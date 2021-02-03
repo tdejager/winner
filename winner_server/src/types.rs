@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 /// The people that we call winners that are in the room
-pub struct Winner(String);
+pub struct Winner(pub String);
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Room {
