@@ -1,7 +1,7 @@
 use crate::types::{Story, StoryPoints, Winner};
 use serde_derive::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub enum StateChange {
     ENTER,
     LEAVE,
@@ -10,8 +10,14 @@ pub enum StateChange {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RoomStateChangeMessage {
-    pub change: StateChange,
     pub winner: Winner,
+    pub change: StateChange,
+}
+
+impl RoomStateChangeMessage {
+    pub fn new(winner: Winner, change: StateChange) -> Self {
+        Self { winner, change }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
