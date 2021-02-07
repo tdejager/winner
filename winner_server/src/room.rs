@@ -116,7 +116,9 @@ impl Room {
     fn unsubscribe(&mut self, winner: &Winner) {
         self.paricipants.remove(winner);
         // Notify the rest that someone has left
-        self.send_server_message(ServerMessages::RoomStateChange(RoomStateChangeMessage::new(winner.clone(), StateChange::LEAVE)));
+        self.send_server_message(ServerMessages::RoomStateChange(
+            RoomStateChangeMessage::new(winner.clone(), StateChange::LEAVE),
+        ));
         // Set a new leader if it is available
         if self.paricipants.len() > 0 {
             // Get the first nexe leader
