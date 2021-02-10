@@ -10,17 +10,18 @@ use crate::{
     messages::RoomStateChangeMessage,
     messages::StateChange,
     messages::{ClientMessages, ServerMessages},
-    types::Winner,
+    types::{Story, StoryPoints, Winner},
 };
 
 const CHANNEL_SIZE: usize = 100;
 
 /// The state that a Room can be in
+#[derive(Debug)]
 enum RoomState {
     /// Waiting for a vote
     Idle,
     /// Actually voting
-    Voting,
+    Voting(CurrentVote),
 }
 
 #[derive(Debug)]
@@ -40,6 +41,21 @@ pub struct SubscriptionData {
 pub enum SubscriptionResponse {
     Ok(SubscriptionData),
     WinnerExists,
+}
+
+#[derive(Debug)]
+struct CurrentVote {
+    pub story: Story,
+    pub votes: Vec<StoryPoints>,
+}
+
+impl CurrentVote {
+    pub fn new(story: &Story) -> Self {
+        Self {
+            story: story.clone(),
+            votes: Vec::new(),
+        }
+    }
 }
 
 /// Implementation of a room
@@ -121,7 +137,7 @@ impl Room {
         ));
         // Set a new leader if it is available
         if self.paricipants.len() > 0 {
-            // Get the first nexe leader
+            // Get the first next leader
             let new_leader = self.paricipants.iter().next().unwrap().clone();
             // Set it as the new leader
             self.set_leader(&new_leader)
@@ -138,11 +154,11 @@ impl Room {
     pub async fn run(&mut self) {
         loop {
             // Run different states for the room
-            match self.current_state {
+            match &self.current_state {
                 // Waiting for connections and for votes, or leadership changes
-                RoomState::Idle => self.idle_loop(),
+                RoomState::Idle => self.idle_loop().await,
                 // In voting state
-                RoomState::Voting => {}
+                RoomState::Voting(current_vote) => {}
             }
 
             // Wait to yield for now
@@ -151,26 +167,37 @@ impl Room {
     }
 
     /// The loop to run when running in idle mode
-    fn idle_loop(&mut self) {
-        // Check for new subscriptions
-        // subscribe if possible
-        if let Some(Some(req)) = self.subscription_receiver.recv().now_or_never() {
-            let response = self.subscribe(&req);
-            req.response
-                .send(response)
-                .expect("Could not send subscription response");
-        }
+    async fn idle_loop(&mut self) {
+        while let RoomState::Idle = self.current_state {
+            // Check for new subscriptions
+            // subscribe if possible
+            if let Some(Some(req)) = self.subscription_receiver.recv().now_or_never() {
+                println!("Received subscription");
+                let response = self.subscribe(&req);
+                req.response
+                    .send(response)
+                    .expect("Could not send subscription response");
+                println!("Subscription sent");
+            }
 
-        // Process server messages
-        if let Some(Ok(msg)) = self.incoming.recv().now_or_never() {
-            match msg {
-                ClientMessages::RoomStateChange(change) => match change.change {
-                    StateChange::LEAVE => self.unsubscribe(&change.winner),
-                    _ => {}
-                },
-                ClientMessages::AcknowledgeLeader(_) => {}
-                ClientMessages::StartVote(_) => {}
-                ClientMessages::Vote(_) => {}
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            // Process server messages
+            println!("Processing server messages");
+            if let Ok(msg) = self.incoming.recv().await {
+                println!("Processing server messages 1");
+                match msg {
+                    ClientMessages::RoomStateChange(change) => match change.change {
+                        // Leaving room, so unsubscribe
+                        StateChange::LEAVE => self.unsubscribe(&change.winner),
+                        _ => {}
+                    },
+                    ClientMessages::StartVote(msg) => {
+                        self.current_state = RoomState::Voting(CurrentVote::new(&msg.story))
+                    }
+                    // Ignore these messages
+                    ClientMessages::Vote(_) => {}
+                    ClientMessages::AcknowledgeLeader(_) => {}
+                }
             }
         }
     }
