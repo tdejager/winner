@@ -153,7 +153,6 @@ impl Room {
     /// Main loop of the room that is running
     pub async fn run(&mut self) {
         loop {
-            // Run different states for the room
             match &self.current_state {
                 // Waiting for connections and for votes, or leadership changes
                 RoomState::Idle => self.idle_loop().await,
@@ -169,8 +168,7 @@ impl Room {
     /// The loop to run when running in idle mode
     async fn idle_loop(&mut self) {
         while let RoomState::Idle = self.current_state {
-            // Check for new subscriptions
-            // subscribe if possible
+            // Check for new subscriptions, skip if there are none
             if let Some(Some(req)) = self.subscription_receiver.recv().now_or_never() {
                 println!("Received subscription");
                 let response = self.subscribe(&req);
@@ -180,9 +178,10 @@ impl Room {
                 println!("Subscription sent");
             }
 
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            // Process server messages
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            // Process incoming messages
             println!("Processing server messages");
+            //if let Some(Ok(msg)) = self.incoming.recv().now_or_never() {
             if let Ok(msg) = self.incoming.recv().await {
                 println!("Processing server messages 1");
                 match msg {
