@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+
 use std::collections::HashSet;
 
 use futures::future::FutureExt;
@@ -168,34 +169,34 @@ impl Room {
     /// The loop to run when running in idle mode
     async fn idle_loop(&mut self) {
         while let RoomState::Idle = self.current_state {
-            // Check for new subscriptions, skip if there are none
-            if let Some(Some(req)) = self.subscription_receiver.recv().now_or_never() {
-                println!("Received subscription");
-                let response = self.subscribe(&req);
-                req.response
-                    .send(response)
-                    .expect("Could not send subscription response");
-                println!("Subscription sent");
-            }
+            tokio::select! {
 
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            // Process incoming messages
-            println!("Processing server messages");
-            //if let Some(Ok(msg)) = self.incoming.recv().now_or_never() {
-            if let Ok(msg) = self.incoming.recv().await {
-                println!("Processing server messages 1");
-                match msg {
-                    ClientMessages::RoomStateChange(change) => match change.change {
-                        // Leaving room, so unsubscribe
-                        StateChange::LEAVE => self.unsubscribe(&change.winner),
-                        _ => {}
-                    },
-                    ClientMessages::StartVote(msg) => {
-                        self.current_state = RoomState::Voting(CurrentVote::new(&msg.story))
+                // Subscriber future
+                Some(req) = self.subscription_receiver.recv() => {
+                    println!("Received subscription");
+                    let response = self.subscribe(&req);
+                    req.response
+                        .send(response)
+                        .expect("Could not send subscription response");
+                    println!("Subscription sent");
+                },
+
+                // Incoming messages future
+                Ok(msg) = self.incoming.recv() => {
+                    println!("Processing server messages");
+                    match msg {
+                        ClientMessages::RoomStateChange(change) => match change.change {
+                            // Leaving room, so unsubscribe
+                            StateChange::LEAVE => self.unsubscribe(&change.winner),
+                            _ => {}
+                        },
+                        ClientMessages::StartVote(msg) => {
+                            self.current_state = RoomState::Voting(CurrentVote::new(&msg.story))
+                        }
+                        // Ignore these messages
+                        ClientMessages::Vote(_) => {}
+                        ClientMessages::AcknowledgeLeader(_) => {}
                     }
-                    // Ignore these messages
-                    ClientMessages::Vote(_) => {}
-                    ClientMessages::AcknowledgeLeader(_) => {}
                 }
             }
         }
@@ -252,44 +253,104 @@ pub fn setup_room() -> (Room, RoomCommunication) {
     )
 }
 
+/// Struct to communicate with the room from the client side
+pub struct WinnerRoomCommunication {
+    pub winner: Winner,
+    pub message_send: Sender<ClientMessages>,
+    pub message_receive: Receiver<ServerMessages>,
+}
+
+impl WinnerRoomCommunication {
+    pub fn new(
+        winner: Winner,
+        message_send: Sender<ClientMessages>,
+        message_receive: Receiver<ServerMessages>,
+    ) -> Self {
+        Self {
+            winner,
+            message_send,
+            message_receive,
+        }
+    }
+
+    /// Leave the room, consumes this object
+    pub fn leave_room(self) {
+        self.message_send
+            .send(ClientMessages::RoomStateChange(
+                RoomStateChangeMessage::new(self.winner.clone(), StateChange::LEAVE),
+            ))
+            .expect("Unable to send room state change");
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{
-        messages::ClientMessages::RoomStateChange, messages::RoomStateChangeMessage,
-        messages::ServerMessages, messages::StateChange, types::Winner,
-    };
+    use tokio::task::JoinHandle;
 
-    use super::{setup_room, SubscriptionData, SubscriptionResponse};
+    use crate::{messages::ServerMessages, messages::StateChange, types::Winner};
+
+    use super::{
+        setup_room, RoomCommunication, SubscriptionData, SubscriptionResponse,
+        WinnerRoomCommunication,
+    };
 
     /// Test whether the subscription response is ok
     fn subscription_response_ok(response: SubscriptionResponse) -> SubscriptionData {
+        println!("subscription_response_ok");
         match response {
             SubscriptionResponse::Ok(data) => data,
             SubscriptionResponse::WinnerExists => panic!("Winner already exists"),
         }
     }
 
-    #[tokio::test]
-    pub async fn test_subscription() {
+    /// Contains test info
+    struct TestSetup {
+        winner_communication: WinnerRoomCommunication,
+        rival_communication: WinnerRoomCommunication,
+        room_communication: RoomCommunication,
+        room_handle: JoinHandle<()>,
+    }
+
+    /// Scaffolding test code
+    async fn setup_test() -> TestSetup {
         let winner = Winner("Me".into());
         let rival = Winner("Rival".into());
 
-        let (mut room, communcation) = setup_room();
+        let (mut room, room_communication) = setup_room();
 
         // Run the room
-        tokio::spawn(async move { room.run().await });
+        let room_handle = tokio::spawn(async move { room.run().await });
 
         // Try to create a subscription
-        let _ = subscription_response_ok(communcation.subscribe(&winner).await);
+        let winner_data = subscription_response_ok(room_communication.subscribe(&winner).await);
 
         // Try to create another, subscription
-        let data = subscription_response_ok(communcation.subscribe(&rival).await);
-        assert!(data.winners.contains(&rival));
-        assert_eq!(data.leader.expect("Expected leader to be set"), winner);
+        let rival_data = subscription_response_ok(room_communication.subscribe(&rival).await);
+
+        // Winner communication
+        let winner_communication = WinnerRoomCommunication::new(
+            winner.clone(),
+            room_communication.client_sender.clone(),
+            winner_data.message_receive,
+        );
+
+        // Rival communication
+        let rival_communication = WinnerRoomCommunication::new(
+            rival.clone(),
+            room_communication.client_sender.clone(),
+            rival_data.message_receive,
+        );
+
+        TestSetup {
+            winner_communication,
+            rival_communication,
+            room_communication,
+            room_handle,
+        }
     }
 
     #[tokio::test]
-    pub async fn test_leaving() {
+    pub async fn test_subscription() {
         let winner = Winner("Me".into());
         let rival = Winner("Rival".into());
 
@@ -302,37 +363,57 @@ mod tests {
         let _ = subscription_response_ok(communication.subscribe(&winner).await);
 
         // Try to create another, subscription
-        let mut data = subscription_response_ok(communication.subscribe(&rival).await);
+        let data = subscription_response_ok(communication.subscribe(&rival).await);
 
+        assert!(data.winners.contains(&rival));
+        assert_eq!(data.leader.expect("Expected leader to be set"), winner);
+    }
+
+    #[tokio::test]
+    pub async fn test_leaving() {
+        let TestSetup {
+            winner_communication,
+            mut rival_communication,
+            ..
+        } = setup_test().await;
+
+        // Clone the winner so we can compare it later
+        let winner = winner_communication.winner.clone();
         // I leave the room
-        communication
-            .client_sender
-            .send(RoomStateChange(RoomStateChangeMessage::new(
-                winner.clone(),
-                StateChange::LEAVE,
-            )))
-            .unwrap();
+        winner_communication.leave_room();
 
         // I receive a room leave message
-        let msg = data
+        let msg = rival_communication
             .message_receive
             .recv()
             .await
             .expect("Could not receive message");
+
         if let ServerMessages::RoomStateChange(change) = msg {
             assert_eq!(change.change, StateChange::LEAVE);
             assert_eq!(change.winner, winner);
         }
 
         // I receive a leadership change message
-        let msg = data
+        let msg = rival_communication
             .message_receive
             .recv()
             .await
             .expect("Could not receive message");
+
         if let ServerMessages::RoomStateChange(change) = msg {
             assert_eq!(change.change, StateChange::LEADER);
-            assert_eq!(change.winner, rival);
+            assert_eq!(change.winner, rival_communication.winner);
         }
+    }
+
+    #[tokio::test]
+    pub async fn test_voting() {
+        let winner = Winner("Me".into());
+        let (mut room, communication) = setup_room();
+        tokio::spawn(async move { room.run().await });
+
+        // Try to create a subscription
+        let sub = subscription_response_ok(communication.subscribe(&winner).await);
     }
 }
