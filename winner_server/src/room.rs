@@ -1,16 +1,14 @@
 #![allow(dead_code)]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use futures::future::FutureExt;
-use tokio::sync::broadcast::{channel, error::SendError, Receiver, Sender};
+use tokio::sync::broadcast::{channel, Receiver, Sender};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 use crate::{
-    messages::RoomStateChangeMessage,
     messages::StateChange,
-    messages::{ClientMessages, ServerMessages},
+    messages::{ClientMessages, RoomStateChange, ServerMessages},
     types::{Story, StoryPoints, Winner},
 };
 
@@ -44,17 +42,17 @@ pub enum SubscriptionResponse {
     WinnerExists,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CurrentVote {
     pub story: Story,
-    pub votes: Vec<StoryPoints>,
+    pub votes: HashMap<Winner, StoryPoints>,
 }
 
 impl CurrentVote {
     pub fn new(story: &Story) -> Self {
         Self {
             story: story.clone(),
-            votes: Vec::new(),
+            votes: HashMap::new(),
         }
     }
 }
@@ -96,9 +94,10 @@ impl Room {
         // Set new leader, send outgoing messages
         self.leader = Some(winner.clone());
         // Send a message that the leader has changed
-        self.send_server_message(ServerMessages::RoomStateChange(
-            RoomStateChangeMessage::new(winner.clone(), StateChange::LEADER),
-        ));
+        self.send_server_message(ServerMessages::RoomParticipantsChange((
+            winner.clone(),
+            StateChange::Leader,
+        )));
     }
 
     /// Subscribe to this room
@@ -133,9 +132,10 @@ impl Room {
     fn unsubscribe(&mut self, winner: &Winner) {
         self.paricipants.remove(winner);
         // Notify the rest that someone has left
-        self.send_server_message(ServerMessages::RoomStateChange(
-            RoomStateChangeMessage::new(winner.clone(), StateChange::LEAVE),
-        ));
+        self.send_server_message(ServerMessages::RoomParticipantsChange((
+            winner.clone(),
+            StateChange::Leave,
+        )));
         // Set a new leader if it is available
         if self.paricipants.len() > 0 {
             // Get the first next leader
@@ -151,23 +151,37 @@ impl Room {
         let _ = self.outgoing.send(message);
     }
 
+    /// Set a new room state
+    fn set_room_state(&mut self, room_state: RoomState) {
+        // Update the current state
+        self.current_state = room_state;
+        let change = match self.current_state {
+            RoomState::Idle => ServerMessages::RoomStateChange(RoomStateChange::Idle),
+            RoomState::Voting(_) => ServerMessages::RoomStateChange(RoomStateChange::Voting),
+        };
+        // Send a change message
+        self.send_server_message(change);
+    }
+}
+
+impl Room {
     /// Main loop of the room that is running
     pub async fn run(&mut self) {
         loop {
             match &self.current_state {
                 // Waiting for connections and for votes, or leadership changes
-                RoomState::Idle => self.idle_loop().await,
+                RoomState::Idle => self.idle().await,
                 // In voting state
-                RoomState::Voting(current_vote) => {}
+                RoomState::Voting(current_vote) => {
+                    let current_vote = current_vote.clone();
+                    self.voting(current_vote).await;
+                }
             }
-
-            // Wait to yield for now
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 
     /// The loop to run when running in idle mode
-    async fn idle_loop(&mut self) {
+    async fn idle(&mut self) {
         while let RoomState::Idle = self.current_state {
             tokio::select! {
 
@@ -185,21 +199,102 @@ impl Room {
                 Ok(msg) = self.incoming.recv() => {
                     println!("Processing server messages");
                     match msg {
-                        ClientMessages::RoomStateChange(change) => match change.change {
+                        // TODO: maybe move this to a seperate task, so we do not need to repeat
+                        // this everywhere?
+                        ClientMessages::RoomStateChange((winner, change)) => match change {
                             // Leaving room, so unsubscribe
-                            StateChange::LEAVE => self.unsubscribe(&change.winner),
+                            StateChange::Leave => self.unsubscribe(&winner),
                             _ => {}
                         },
-                        ClientMessages::StartVote(msg) => {
-                            self.current_state = RoomState::Voting(CurrentVote::new(&msg.story))
+                        // A new vote is requested
+                        ClientMessages::StartVote(story) => {
+                            self.send_server_message(ServerMessages::RoomStateChange(RoomStateChange::Voting));
+                            self.current_state = RoomState::Voting(CurrentVote::new(&story));
                         }
-                        // Ignore these messages
-                        ClientMessages::Vote(_) => {}
-                        ClientMessages::AcknowledgeLeader(_) => {}
+                        // Ignore these messages for now
+                        _ => {},
                     }
                 }
             }
         }
+    }
+
+    async fn voting(&mut self, mut vote: CurrentVote) {
+        // Notify clients that a vote has started
+        self.send_server_message(ServerMessages::StartVote(vote.story.clone()));
+
+        // Wait for votes to come in
+        while self.paricipants.len() != vote.votes.len() {
+            match self
+                .incoming
+                .recv()
+                .await
+                .expect("No more incoming messages could be received")
+            {
+                // Process actual vote
+                ClientMessages::Vote((winner, story, story_points)) => {
+                    if story == vote.story {
+                        vote.votes.insert(winner, story_points);
+                    }
+                }
+                ClientMessages::RoomStateChange((winner, change)) => match change {
+                    // Leaving room, so unsubscribe, we do not need to include participant for the count
+                    StateChange::Leave => self.unsubscribe(&winner),
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+
+        // Broadcast results, let everyone know
+        self.send_server_message(ServerMessages::VotesReceived(vote.votes.clone()));
+
+        // Start a fight between participants if the votes are unequal
+        // This check checks if the min and the max of the vector are the same
+        // if they are they only contain the same votes
+        // skip this if there is only a single particpant as well
+        if vote.votes.len() > 1
+            && vote.votes.iter().map(|a| a.1).max() != vote.votes.iter().map(|a| a.1).min()
+        {
+            // Choose highest and lowest winners to do a fight
+            let highest_entry = vote.votes.iter().max_by(|x, y| x.1.cmp(y.1));
+            let lowest_entry = vote.votes.iter().min_by(|x, y| x.1.cmp(y.1));
+
+            if highest_entry.is_some() && lowest_entry.is_some() {
+                let highest_winner = highest_entry.unwrap().0;
+                let lowest_winner = lowest_entry.unwrap().0;
+                // Send out a fight message
+                self.send_server_message(ServerMessages::Fight((
+                    highest_entry.unwrap().0.clone(),
+                    lowest_entry.unwrap().0.clone(),
+                )));
+
+                // Wait for the fight to be resolved
+                let mut fight_resolved = false;
+                while !fight_resolved
+                    && self.paricipants.contains(highest_winner)
+                    && self.paricipants.contains(lowest_winner)
+                {
+                    match self
+                        .incoming
+                        .recv()
+                        .await
+                        .expect("No more incoming messages could be received")
+                    {
+                        ClientMessages::FightResolved => fight_resolved = true,
+                        ClientMessages::RoomStateChange((winner, change)) => match change {
+                            // Leaving room, so unsubscribe, we do not need to include participant for the count
+                            StateChange::Leave => self.unsubscribe(&winner),
+                            _ => {}
+                        },
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Back to Idle state
+        self.set_room_state(RoomState::Idle);
     }
 }
 
@@ -273,13 +368,35 @@ impl WinnerRoomCommunication {
         }
     }
 
+    /// Send a client message to the sever
+    fn send_client_message(&self, message: ClientMessages) {
+        self.message_send
+            .send(message)
+            .expect("Unable to send client message");
+    }
+
     /// Leave the room, consumes this object
     pub fn leave_room(self) {
         self.message_send
-            .send(ClientMessages::RoomStateChange(
-                RoomStateChangeMessage::new(self.winner.clone(), StateChange::LEAVE),
-            ))
+            .send(ClientMessages::RoomStateChange((
+                self.winner.clone(),
+                StateChange::Leave,
+            )))
             .expect("Unable to send room state change");
+    }
+
+    /// Start a vote
+    pub fn start_vote(&self, story: &Story) {
+        self.send_client_message(ClientMessages::StartVote(story.clone()));
+    }
+
+    /// Cast a vote
+    pub fn cast_vote(&self, story: &Story, points: StoryPoints) {
+        self.send_client_message(ClientMessages::Vote((
+            self.winner.clone(),
+            story.clone(),
+            points.clone(),
+        )));
     }
 }
 
@@ -287,7 +404,12 @@ impl WinnerRoomCommunication {
 mod tests {
     use tokio::task::JoinHandle;
 
-    use crate::{messages::ServerMessages, messages::StateChange, types::Winner};
+    use crate::{
+        messages::RoomStateChange,
+        messages::ServerMessages,
+        messages::StateChange,
+        types::{Story, StoryId, Winner},
+    };
 
     use super::{
         setup_room, RoomCommunication, SubscriptionData, SubscriptionResponse,
@@ -389,9 +511,12 @@ mod tests {
             .await
             .expect("Could not receive message");
 
-        if let ServerMessages::RoomStateChange(change) = msg {
-            assert_eq!(change.change, StateChange::LEAVE);
-            assert_eq!(change.winner, winner);
+        if let ServerMessages::RoomParticipantsChange(change) = msg {
+            let (winner, state_change) = change;
+            assert_eq!(state_change, StateChange::Leave);
+            assert_eq!(winner, winner);
+        } else {
+            panic!("Wrong message type received {:?}", msg);
         }
 
         // I receive a leadership change message
@@ -401,19 +526,45 @@ mod tests {
             .await
             .expect("Could not receive message");
 
-        if let ServerMessages::RoomStateChange(change) = msg {
-            assert_eq!(change.change, StateChange::LEADER);
-            assert_eq!(change.winner, rival_communication.winner);
+        if let ServerMessages::RoomParticipantsChange(change) = msg {
+            let (winner, state_change) = change;
+            assert_eq!(state_change, StateChange::Leader);
+            assert_eq!(winner, rival_communication.winner);
+        } else {
+            panic!("Wrong message type received {:?}", msg);
         }
     }
 
     #[tokio::test]
     pub async fn test_voting() {
-        let winner = Winner("Me".into());
-        let (mut room, communication) = setup_room();
-        tokio::spawn(async move { room.run().await });
+        let TestSetup {
+            mut winner_communication,
+            ..
+        } = setup_test().await;
 
-        // Try to create a subscription
-        let sub = subscription_response_ok(communication.subscribe(&winner).await);
+        let story = Story::new(StoryId(0), "New story");
+
+        winner_communication.start_vote(&story);
+
+        let msg = winner_communication
+            .message_receive
+            .recv()
+            .await
+            .expect("Could not receive state change message");
+
+        // We should receive a message that the room state has changed
+        assert!(matches!(
+            msg,
+            ServerMessages::RoomStateChange(RoomStateChange::Voting)
+        ));
+
+        let msg = winner_communication
+            .message_receive
+            .recv()
+            .await
+            .expect("Could not receive state change message");
+
+        // We should receive a message that the room state has changed
+        assert!(matches!(msg, ServerMessages::StartVote(_)));
     }
 }

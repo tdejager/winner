@@ -18,26 +18,34 @@ pub struct Room {
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Hash, Debug, Clone)]
-pub struct StoryId(usize);
+pub struct StoryId(pub usize);
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub struct Story {
     pub id: StoryId,
     pub title: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+impl Story {
+    pub fn new<T: Into<String>>(id: StoryId, title: T) -> Self {
+        Story {
+            id,
+            title: title.into(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub enum StoryPoints {
-    ONE,
-    TWO,
-    THREE,
-    FIVE,
-    EIGHT,
-    THIRTEEN,
-    TWENTY,
-    EXPLAIN,
-    UNKOWN,
-    COFFEE,
+    ONE = 1,
+    TWO = 2,
+    THREE = 3,
+    FIVE = 5,
+    EIGHT = 8,
+    THIRTEEN = 13,
+    TWENTY = 20,
+    UNKOWN = 100,
+    COFFEE = 101,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

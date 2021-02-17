@@ -1,61 +1,47 @@
 use crate::types::{Story, StoryPoints, Winner};
 use serde_derive::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub enum StateChange {
-    ENTER,
-    LEAVE,
-    LEADER,
+    Enter,
+    Leave,
+    Leader,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct RoomStateChangeMessage {
-    pub winner: Winner,
-    pub change: StateChange,
-}
-
-impl RoomStateChangeMessage {
-    pub fn new(winner: Winner, change: StateChange) -> Self {
-        Self { winner, change }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct FightMessage {
-    pub winner_1: Winner,
-    pub winner_2: Winner,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct StartVoteMessage {
-    pub story: Story,
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
+pub enum RoomStateChange {
+    Voting,
+    Idle,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 /// Messages that are sent by the server
 pub enum ServerMessages {
     /// Sent when something in a room changes
-    RoomStateChange(RoomStateChangeMessage),
+    RoomParticipantsChange((Winner, StateChange)),
+    /// Sent when the state of the room changes
+    RoomStateChange(RoomStateChange),
     /// Sent when two people should debate story points
-    Fight(FightMessage),
+    Fight((Winner, Winner)),
     /// Sent when a vote has to be done for a story
-    StartVote(StartVoteMessage),
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct VoteMessage {
-    pub story: Story,
-    pub story_points: StoryPoints,
+    StartVote(Story),
+    /// Vote has finished
+    VotesReceived(HashMap<Winner, StoryPoints>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 /// Messages that are received by the server
 pub enum ClientMessages {
-    RoomStateChange(RoomStateChangeMessage),
+    RoomStateChange((Winner, StateChange)),
     /// Reply to acknowledge the leader
     AcknowledgeLeader(bool),
     /// Sent when a vote has to be done for a story
-    StartVote(StartVoteMessage),
+    StartVote(Story),
     /// Sent to cast an actual vote
-    Vote(VoteMessage),
+    Vote((Winner, Story, StoryPoints)),
+    /// Fight resolved
+    FightResolved,
+    // Final story points, which should include the leader correct story and storypoints
+    //FinalStoryPoints((Winner, Story, StoryPoints)),
 }
