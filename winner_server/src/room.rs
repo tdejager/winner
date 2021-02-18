@@ -146,6 +146,11 @@ impl Room {
         }
     }
 
+    /// Receive message from the incoming channel
+    async fn receive_incoming_messages(&mut self) -> ClientMessages {
+        self.incoming.recv().await.expect("Could not receive incoming messages")
+    }
+
     /// Send a server messages
     fn send_server_message(&mut self, message: ServerMessages) {
         // Ignore if we are unable to send, it's okay if no one is listening
@@ -228,11 +233,7 @@ impl Room {
         println!("Waiting for votes");
         // Wait for votes to come in
         while self.participants.len() > vote.votes.len() {
-            match self
-                .incoming
-                .recv()
-                .await
-                .expect("No more incoming messages could be received")
+            match self.receive_incoming_messages()
             {
                 // Process actual vote
                 ClientMessages::Vote((winner, story, story_points)) => {
@@ -262,7 +263,7 @@ impl Room {
         // Start a fight between participants if the votes are unequal
         // This check checks if the min and the max of the vector are the same
         // if they are they only contain the same votes
-        // skip this if there is only a single particpant as well
+        // skip this if there is only a single participant as well
         if vote.votes.len() > 1
             && vote.votes.iter().map(|a| a.1).max() != vote.votes.iter().map(|a| a.1).min()
         {
@@ -285,11 +286,7 @@ impl Room {
                     && self.participants.contains(highest_winner)
                     && self.participants.contains(lowest_winner)
                 {
-                    match self
-                        .incoming
-                        .recv()
-                        .await
-                        .expect("No more incoming messages could be received")
+                    match self.receive_incoming_messages()
                     {
                         ClientMessages::FightResolved => fight_resolved = true,
                         ClientMessages::RoomStateChange((winner, change)) => match change {
