@@ -61,7 +61,7 @@ impl CurrentVote {
 pub struct Room {
     current_state: RoomState,
     /// Current paricipants in the room
-    paricipants: HashSet<Winner>,
+    participants: HashSet<Winner>,
     /// Incoming message that need to be processed
     incoming: Receiver<ClientMessages>,
     /// Outgoing message that will be processed by the clients
@@ -80,7 +80,7 @@ impl Room {
         outgoing: Sender<ServerMessages>,
     ) -> Self {
         Room {
-            paricipants: HashSet::new(),
+            participants: HashSet::new(),
             current_state: RoomState::Idle,
             incoming,
             outgoing,
@@ -102,12 +102,13 @@ impl Room {
 
     /// Subscribe to this room
     fn subscribe(&mut self, subscription_request: &SubscriptionRequest) -> SubscriptionResponse {
-        if !self.paricipants.contains(&subscription_request.winner) {
+        if !self.participants.contains(&subscription_request.winner) {
             // Insert participant if it does not exist
-            self.paricipants.insert(subscription_request.winner.clone());
+            self.participants
+                .insert(subscription_request.winner.clone());
             // Get all participants
             let winners = self
-                .paricipants
+                .participants
                 .iter()
                 .map(|winner| winner.clone())
                 .collect::<Vec<Winner>>();
@@ -130,16 +131,16 @@ impl Room {
 
     /// Unsubscribe from the room
     fn unsubscribe(&mut self, winner: &Winner) {
-        self.paricipants.remove(winner);
+        self.participants.remove(winner);
         // Notify the rest that someone has left
         self.send_server_message(ServerMessages::RoomParticipantsChange((
             winner.clone(),
             StateChange::Leave,
         )));
         // Set a new leader if it is available
-        if self.paricipants.len() > 0 {
+        if self.participants.len() > 0 {
             // Get the first next leader
-            let new_leader = self.paricipants.iter().next().unwrap().clone();
+            let new_leader = self.participants.iter().next().unwrap().clone();
             // Set it as the new leader
             self.set_leader(&new_leader)
         }
@@ -220,11 +221,13 @@ impl Room {
     }
 
     async fn voting(&mut self, mut vote: CurrentVote) {
+        println!("Starting vote on story {}", vote.story.title);
         // Notify clients that a vote has started
         self.send_server_message(ServerMessages::StartVote(vote.story.clone()));
 
+        println!("Waiting for votes");
         // Wait for votes to come in
-        while self.paricipants.len() != vote.votes.len() {
+        while self.participants.len() > vote.votes.len() {
             match self
                 .incoming
                 .recv()
@@ -233,8 +236,14 @@ impl Room {
             {
                 // Process actual vote
                 ClientMessages::Vote((winner, story, story_points)) => {
+                    println!("Vote received for {} by {:?}", story.title, winner);
                     if story == vote.story {
                         vote.votes.insert(winner, story_points);
+                        println!(
+                            "Received {}/{} votes",
+                            vote.votes.len(),
+                            self.participants.len()
+                        );
                     }
                 }
                 ClientMessages::RoomStateChange((winner, change)) => match change {
@@ -246,6 +255,7 @@ impl Room {
             }
         }
 
+        println!("Votes received");
         // Broadcast results, let everyone know
         self.send_server_message(ServerMessages::VotesReceived(vote.votes.clone()));
 
@@ -272,8 +282,8 @@ impl Room {
                 // Wait for the fight to be resolved
                 let mut fight_resolved = false;
                 while !fight_resolved
-                    && self.paricipants.contains(highest_winner)
-                    && self.paricipants.contains(lowest_winner)
+                    && self.participants.contains(highest_winner)
+                    && self.participants.contains(lowest_winner)
                 {
                     match self
                         .incoming
@@ -398,6 +408,13 @@ impl WinnerRoomCommunication {
             points.clone(),
         )));
     }
+
+    pub async fn receive_message(&mut self) -> ServerMessages {
+        self.message_receive
+            .recv()
+            .await
+            .expect("Could not receive server message")
+    }
 }
 
 #[cfg(test)]
@@ -408,7 +425,7 @@ mod tests {
         messages::RoomStateChange,
         messages::ServerMessages,
         messages::StateChange,
-        types::{Story, StoryId, Winner},
+        types::{Story, StoryId, StoryPoints, Winner},
     };
 
     use super::{
@@ -499,17 +516,11 @@ mod tests {
             ..
         } = setup_test().await;
 
-        // Clone the winner so we can compare it later
-        let winner = winner_communication.winner.clone();
         // I leave the room
         winner_communication.leave_room();
 
         // I receive a room leave message
-        let msg = rival_communication
-            .message_receive
-            .recv()
-            .await
-            .expect("Could not receive message");
+        let msg = rival_communication.receive_message().await;
 
         if let ServerMessages::RoomParticipantsChange(change) = msg {
             let (winner, state_change) = change;
@@ -536,21 +547,25 @@ mod tests {
     }
 
     #[tokio::test]
-    pub async fn test_voting() {
+    pub async fn test_voting_single() {
         let TestSetup {
             mut winner_communication,
+            rival_communication,
             ..
         } = setup_test().await;
+
+        // Rival leaves room
+        rival_communication.leave_room();
+
+        // Skip 2 messages, leaving and leadership change
+        let _ = winner_communication.receive_message().await;
+        let _ = winner_communication.receive_message().await;
 
         let story = Story::new(StoryId(0), "New story");
 
         winner_communication.start_vote(&story);
 
-        let msg = winner_communication
-            .message_receive
-            .recv()
-            .await
-            .expect("Could not receive state change message");
+        let msg = winner_communication.receive_message().await;
 
         // We should receive a message that the room state has changed
         assert!(matches!(
@@ -558,13 +573,29 @@ mod tests {
             ServerMessages::RoomStateChange(RoomStateChange::Voting)
         ));
 
-        let msg = winner_communication
-            .message_receive
-            .recv()
-            .await
-            .expect("Could not receive state change message");
+        let msg = winner_communication.receive_message().await;
 
         // We should receive a message that the room state has changed
         assert!(matches!(msg, ServerMessages::StartVote(_)));
+
+        // Cast a vote
+        winner_communication.cast_vote(&story, StoryPoints::ONE);
+
+        // Because there is only a single voter we should get the result
+        let msg = winner_communication.receive_message().await;
+
+        // We should receive a message that the room state has changed
+        assert!(matches!(msg, ServerMessages::VotesReceived(_)));
+
+        // And room should go back to idle
+        // We should receive a message that the room state has changed
+        let msg = winner_communication.receive_message().await;
+        assert!(matches!(
+            msg,
+            ServerMessages::RoomStateChange(RoomStateChange::Idle)
+        ));
     }
+
+    // TODO: Create test for multiple votes + fight
+    // TODO: Create test if multiple voters have the same vote that there is no fight
 }
