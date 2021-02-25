@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use anyhow::bail;
+use anyhow::Result;
 use tokio::sync::broadcast::{channel, Receiver, Sender};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -148,7 +150,10 @@ impl Room {
 
     /// Receive message from the incoming channel
     async fn receive_incoming_messages(&mut self) -> ClientMessages {
-        self.incoming.recv().await.expect("Could not receive incoming messages")
+        self.incoming
+            .recv()
+            .await
+            .expect("Could not receive incoming messages")
     }
 
     /// Send a server messages
@@ -233,8 +238,7 @@ impl Room {
         println!("Waiting for votes");
         // Wait for votes to come in
         while self.participants.len() > vote.votes.len() {
-            match self.receive_incoming_messages()
-            {
+            match self.receive_incoming_messages().await {
                 // Process actual vote
                 ClientMessages::Vote((winner, story, story_points)) => {
                     println!("Vote received for {} by {:?}", story.title, winner);
@@ -286,8 +290,7 @@ impl Room {
                     && self.participants.contains(highest_winner)
                     && self.participants.contains(lowest_winner)
                 {
-                    match self.receive_incoming_messages()
-                    {
+                    match self.receive_incoming_messages().await {
                         ClientMessages::FightResolved => fight_resolved = true,
                         ClientMessages::RoomStateChange((winner, change)) => match change {
                             // Leaving room, so unsubscribe, we do not need to include participant for the count
@@ -325,7 +328,10 @@ impl RoomCommunication {
     }
 
     /// Subscribe to the Room
-    pub async fn subscribe(&self, winner: &Winner) -> SubscriptionResponse {
+    pub async fn subscribe(
+        &self,
+        winner: &Winner,
+    ) -> anyhow::Result<(WinnerRoomCommunication, Vec<Winner>, Option<Winner>)> {
         let (tx, rx) = oneshot::channel();
         self.subscription_sender
             .send(SubscriptionRequest {
@@ -335,7 +341,20 @@ impl RoomCommunication {
             .await
             .expect("Could not send subscription request");
         println!("Waiting on response");
-        rx.await.expect("Could not get subscription response")
+
+        // Wait for the response and construct required objects
+        match rx.await? {
+            SubscriptionResponse::Ok(data) => Ok((
+                WinnerRoomCommunication::new(
+                    winner.clone(),
+                    self.client_sender.clone(),
+                    data.message_receive,
+                ),
+                data.winners,
+                data.leader,
+            )),
+            SubscriptionResponse::WinnerExists => bail!("Winner already exists"),
+        }
     }
 }
 
@@ -376,34 +395,32 @@ impl WinnerRoomCommunication {
     }
 
     /// Send a client message to the sever
-    fn send_client_message(&self, message: ClientMessages) {
-        self.message_send
-            .send(message)
-            .expect("Unable to send client message");
+    fn send_client_message(&self, message: ClientMessages) -> Result<usize> {
+        Ok(self.message_send.send(message)?)
     }
 
     /// Leave the room, consumes this object
-    pub fn leave_room(self) {
-        self.message_send
-            .send(ClientMessages::RoomStateChange((
-                self.winner.clone(),
-                StateChange::Leave,
-            )))
-            .expect("Unable to send room state change");
+    pub fn leave_room(self) -> anyhow::Result<usize> {
+        Ok(self.message_send.send(ClientMessages::RoomStateChange((
+            self.winner.clone(),
+            StateChange::Leave,
+        )))?)
     }
 
     /// Start a vote
-    pub fn start_vote(&self, story: &Story) {
-        self.send_client_message(ClientMessages::StartVote(story.clone()));
+    pub fn start_vote(&self, story: &Story) -> Result<()> {
+        self.send_client_message(ClientMessages::StartVote(story.clone()))?;
+        Ok(())
     }
 
     /// Cast a vote
-    pub fn cast_vote(&self, story: &Story, points: StoryPoints) {
+    pub fn cast_vote(&self, story: &Story, points: StoryPoints) -> Result<()> {
         self.send_client_message(ClientMessages::Vote((
             self.winner.clone(),
             story.clone(),
             points.clone(),
-        )));
+        )))?;
+        Ok(())
     }
 
     pub async fn receive_message(&mut self) -> ServerMessages {
@@ -425,19 +442,7 @@ mod tests {
         types::{Story, StoryId, StoryPoints, Winner},
     };
 
-    use super::{
-        setup_room, RoomCommunication, SubscriptionData, SubscriptionResponse,
-        WinnerRoomCommunication,
-    };
-
-    /// Test whether the subscription response is ok
-    fn subscription_response_ok(response: SubscriptionResponse) -> SubscriptionData {
-        println!("subscription_response_ok");
-        match response {
-            SubscriptionResponse::Ok(data) => data,
-            SubscriptionResponse::WinnerExists => panic!("Winner already exists"),
-        }
-    }
+    use super::{setup_room, RoomCommunication, WinnerRoomCommunication};
 
     /// Contains test info
     struct TestSetup {
@@ -458,24 +463,16 @@ mod tests {
         let room_handle = tokio::spawn(async move { room.run().await });
 
         // Try to create a subscription
-        let winner_data = subscription_response_ok(room_communication.subscribe(&winner).await);
+        let (winner_communication, ..) = room_communication
+            .subscribe(&winner)
+            .await
+            .expect("Could not subscribe winner");
 
         // Try to create another, subscription
-        let rival_data = subscription_response_ok(room_communication.subscribe(&rival).await);
-
-        // Winner communication
-        let winner_communication = WinnerRoomCommunication::new(
-            winner.clone(),
-            room_communication.client_sender.clone(),
-            winner_data.message_receive,
-        );
-
-        // Rival communication
-        let rival_communication = WinnerRoomCommunication::new(
-            rival.clone(),
-            room_communication.client_sender.clone(),
-            rival_data.message_receive,
-        );
+        let (rival_communication, ..) = room_communication
+            .subscribe(&rival)
+            .await
+            .expect("Could not subscribe rival");
 
         TestSetup {
             winner_communication,
@@ -496,13 +493,13 @@ mod tests {
         tokio::spawn(async move { room.run().await });
 
         // Try to create a subscription
-        let _ = subscription_response_ok(communication.subscribe(&winner).await);
+        let _ = communication.subscribe(&winner).await.unwrap();
 
         // Try to create another, subscription
-        let data = subscription_response_ok(communication.subscribe(&rival).await);
+        let (_, winners, leader) = communication.subscribe(&rival).await.unwrap();
 
-        assert!(data.winners.contains(&rival));
-        assert_eq!(data.leader.expect("Expected leader to be set"), winner);
+        assert!(winners.contains(&rival));
+        assert_eq!(leader.expect("Expected leader to be set"), winner);
     }
 
     #[tokio::test]
@@ -514,7 +511,9 @@ mod tests {
         } = setup_test().await;
 
         // I leave the room
-        winner_communication.leave_room();
+        winner_communication
+            .leave_room()
+            .expect("Could not leave room");
 
         // I receive a room leave message
         let msg = rival_communication.receive_message().await;
@@ -552,7 +551,7 @@ mod tests {
         } = setup_test().await;
 
         // Rival leaves room
-        rival_communication.leave_room();
+        rival_communication.leave_room().unwrap();
 
         // Skip 2 messages, leaving and leadership change
         let _ = winner_communication.receive_message().await;
@@ -560,7 +559,7 @@ mod tests {
 
         let story = Story::new(StoryId(0), "New story");
 
-        winner_communication.start_vote(&story);
+        winner_communication.start_vote(&story).unwrap();
 
         let msg = winner_communication.receive_message().await;
 
@@ -576,7 +575,9 @@ mod tests {
         assert!(matches!(msg, ServerMessages::StartVote(_)));
 
         // Cast a vote
-        winner_communication.cast_vote(&story, StoryPoints::ONE);
+        winner_communication
+            .cast_vote(&story, StoryPoints::ONE)
+            .unwrap();
 
         // Because there is only a single voter we should get the result
         let msg = winner_communication.receive_message().await;
