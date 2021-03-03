@@ -24,6 +24,8 @@ pub enum ServerMessages {
     RoomStateChange(RoomStateChange),
     /// Sent when two people should debate story points
     Fight((Winner, Winner)),
+    /// Sent when a vote has been cast
+    VoteCast((Winner, StoryPoints)),
     /// Sent when a vote has to be done for a story
     StartVote(Story),
     /// Vote has finished

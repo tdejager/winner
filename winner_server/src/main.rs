@@ -1,9 +1,11 @@
+mod client_handler;
 mod messages;
 mod room;
 mod types;
 
 use std::env;
 
+use crate::types::Winner;
 use futures::prelude::*;
 use room::RoomCommunication;
 use serde_json::Value;
@@ -12,7 +14,7 @@ use tokio_serde::formats::*;
 use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
 
 /// Communicate with the room over TCP
-async fn tcp_room(communication: RoomCommunication) {
+async fn tcp_room(communication: RoomCommunication) -> anyhow::Result<()> {
     // Parse the arguments, bind the TCP socket we'll be listening to, spin up
     // our worker threads, and start shipping sockets to those worker threads.
     let addr = env::args()
@@ -23,20 +25,23 @@ async fn tcp_room(communication: RoomCommunication) {
         .expect("Could not open server");
 
     loop {
-        let (socket, _) = server.accept().await.unwrap();
+        // Split into a read and a write part
+        let (incoming_messages, _outgoing_messages) = server.accept().await.unwrap().0.into_split();
 
         // Delimit frames using a length header
-        let length_delimited = FramedRead::new(socket, LengthDelimitedCodec::new());
+        let length_delimited = FramedRead::new(incoming_messages, LengthDelimitedCodec::new());
 
         // Deserialize frames
-        let mut deserialized = tokio_serde::SymmetricallyFramed::new(
+        let mut message_stream = tokio_serde::SymmetricallyFramed::new(
             length_delimited,
             SymmetricalJson::<Value>::default(),
         );
 
+        let communication_clone = communication.clone();
+
         // Spawn a task that prints all received messages to STDOUT
         tokio::spawn(async move {
-            while let Some(msg) = deserialized.try_next().await.unwrap() {
+            while let Some(msg) = message_stream.try_next().await.unwrap() {
                 // Just print for now
                 println!("GOT: {:?}", msg);
             }

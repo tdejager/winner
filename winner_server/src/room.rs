@@ -59,13 +59,20 @@ impl CurrentVote {
     }
 }
 
+/// Struct containing a client message and a channel to send a result
+#[derive(Debug)]
+pub struct ClientMessageRequest {
+    message: ClientMessages,
+    response_channel: oneshot::Sender<anyhow::Result<()>>,
+}
+
 /// Implementation of a room
 pub struct Room {
     current_state: RoomState,
     /// Current paricipants in the room
     participants: HashSet<Winner>,
     /// Incoming message that need to be processed
-    incoming: Receiver<ClientMessages>,
+    incoming: mpsc::Receiver<ClientMessageRequest>,
     /// Outgoing message that will be processed by the clients
     outgoing: Sender<ServerMessages>,
     /// Receives subscription request
@@ -78,7 +85,7 @@ impl Room {
     /// Create a new room
     pub fn new(
         subscription_receiver: mpsc::Receiver<SubscriptionRequest>,
-        incoming: Receiver<ClientMessages>,
+        incoming: mpsc::Receiver<ClientMessageRequest>,
         outgoing: Sender<ServerMessages>,
     ) -> Self {
         Room {
@@ -149,7 +156,7 @@ impl Room {
     }
 
     /// Receive message from the incoming channel
-    async fn receive_incoming_messages(&mut self) -> ClientMessages {
+    async fn receive_incoming_messages(&mut self) -> ClientMessageRequest {
         self.incoming
             .recv()
             .await
@@ -207,11 +214,10 @@ impl Room {
                 },
 
                 // Incoming messages future
-                Ok(msg) = self.incoming.recv() => {
+                Some(msg) = self.incoming.recv() => {
                     println!("Processing server messages");
-                    match msg {
-                        // TODO: maybe move this to a seperate task, so we do not need to repeat
-                        // this everywhere?
+                    let response_channel = msg.response_channel;
+                    match msg.message {
                         ClientMessages::RoomStateChange((winner, change)) => match change {
                             // Leaving room, so unsubscribe
                             StateChange::Leave => self.unsubscribe(&winner),
@@ -219,6 +225,7 @@ impl Room {
                         },
                         // A new vote is requested
                         ClientMessages::StartVote(story) => {
+                            response_channel.send(Ok(())).expect("Could not send 'StartVote' result");
                             self.send_server_message(ServerMessages::RoomStateChange(RoomStateChange::Voting));
                             self.current_state = RoomState::Voting(CurrentVote::new(&story));
                         }
@@ -230,6 +237,7 @@ impl Room {
         }
     }
 
+    /// Handles the voting loop
     async fn voting(&mut self, mut vote: CurrentVote) {
         println!("Starting vote on story {}", vote.story.title);
         // Notify clients that a vote has started
@@ -238,25 +246,41 @@ impl Room {
         println!("Waiting for votes");
         // Wait for votes to come in
         while self.participants.len() > vote.votes.len() {
-            match self.receive_incoming_messages().await {
+            let ClientMessageRequest {
+                message,
+                response_channel,
+            } = self.receive_incoming_messages().await;
+
+            match message {
                 // Process actual vote
                 ClientMessages::Vote((winner, story, story_points)) => {
                     println!("Vote received for {} by {:?}", story.title, winner);
                     if story == vote.story {
-                        vote.votes.insert(winner, story_points);
+                        vote.votes.insert(winner.clone(), story_points.clone());
                         println!(
                             "Received {}/{} votes",
                             vote.votes.len(),
                             self.participants.len()
                         );
                     }
+                    // Communicate that a vote has been cast
+                    response_channel
+                        .send(Ok(()))
+                        .expect("Could not send response");
+                    self.send_server_message(ServerMessages::VoteCast((winner, story_points)));
                 }
                 ClientMessages::RoomStateChange((winner, change)) => match change {
                     // Leaving room, so unsubscribe, we do not need to include participant for the count
                     StateChange::Leave => self.unsubscribe(&winner),
                     _ => {}
                 },
-                _ => {}
+
+                // Other messages cannot be processed in this state
+                _ => response_channel
+                    .send(Err(anyhow::anyhow!(
+                        "Cant process this message when in 'Voting' state"
+                    )))
+                    .expect("Could not sends response"),
             }
         }
 
@@ -290,14 +314,24 @@ impl Room {
                     && self.participants.contains(highest_winner)
                     && self.participants.contains(lowest_winner)
                 {
-                    match self.receive_incoming_messages().await {
+                    let ClientMessageRequest {
+                        message,
+                        response_channel,
+                    } = self.receive_incoming_messages().await;
+                    match message {
                         ClientMessages::FightResolved => fight_resolved = true,
                         ClientMessages::RoomStateChange((winner, change)) => match change {
                             // Leaving room, so unsubscribe, we do not need to include participant for the count
                             StateChange::Leave => self.unsubscribe(&winner),
-                            _ => {}
+                            _ => response_channel
+                                .send(Err(anyhow::anyhow!("Can't process this RoomStateChange")))
+                                .expect("Could not sends message"),
                         },
-                        _ => {}
+                        _ => response_channel
+                            .send(Err(anyhow::anyhow!(
+                                "Can't process this message when in 'Fighting' state"
+                            )))
+                            .expect("Could not sends response"),
                     }
                 }
             }
@@ -309,16 +343,17 @@ impl Room {
 }
 
 /// Contains all the channels to communicate with a Room
+#[derive(Clone)]
 pub struct RoomCommunication {
     /// Sender to which can be cloned to create server messages
-    pub client_sender: Sender<ClientMessages>,
+    pub client_sender: mpsc::Sender<ClientMessageRequest>,
     /// Sender to try to get a subscription to the room
     pub subscription_sender: mpsc::Sender<SubscriptionRequest>,
 }
 
 impl RoomCommunication {
     pub fn new(
-        client_sender: Sender<ClientMessages>,
+        client_sender: mpsc::Sender<ClientMessageRequest>,
         subscription_sender: mpsc::Sender<SubscriptionRequest>,
     ) -> Self {
         Self {
@@ -328,6 +363,7 @@ impl RoomCommunication {
     }
 
     /// Subscribe to the Room
+    /// returns a struct to communicate with the room and the initial state a Vector of winners and an optional winner
     pub async fn subscribe(
         &self,
         winner: &Winner,
@@ -340,7 +376,6 @@ impl RoomCommunication {
             })
             .await
             .expect("Could not send subscription request");
-        println!("Waiting on response");
 
         // Wait for the response and construct required objects
         match rx.await? {
@@ -367,7 +402,7 @@ pub fn setup_room() -> (Room, RoomCommunication) {
     let (server_sender, _) = channel(CHANNEL_SIZE);
 
     // Create channel for client messages
-    let (client_sender, client_receiver) = channel(CHANNEL_SIZE);
+    let (client_sender, client_receiver) = mpsc::channel(CHANNEL_SIZE);
     (
         Room::new(subscription_receiver, client_receiver, server_sender),
         RoomCommunication::new(client_sender, subscription_sender),
@@ -377,14 +412,14 @@ pub fn setup_room() -> (Room, RoomCommunication) {
 /// Struct to communicate with the room from the client side
 pub struct WinnerRoomCommunication {
     pub winner: Winner,
-    pub message_send: Sender<ClientMessages>,
+    pub message_send: mpsc::Sender<ClientMessageRequest>,
     pub message_receive: Receiver<ServerMessages>,
 }
 
 impl WinnerRoomCommunication {
     pub fn new(
         winner: Winner,
-        message_send: Sender<ClientMessages>,
+        message_send: mpsc::Sender<ClientMessageRequest>,
         message_receive: Receiver<ServerMessages>,
     ) -> Self {
         Self {
@@ -395,39 +430,74 @@ impl WinnerRoomCommunication {
     }
 
     /// Send a client message to the sever
-    fn send_client_message(&self, message: ClientMessages) -> Result<usize> {
-        Ok(self.message_send.send(message)?)
+    async fn send_client_request(&self, message: ClientMessages) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.message_send
+            .send(ClientMessageRequest {
+                message,
+                response_channel: tx,
+            })
+            .await?;
+        // Await the response
+        let response = rx.await?;
+        // Propagate the error if the response failed, otherwise return ok
+        Ok(response?)
+    }
+
+    /// Send a message to the room and ignore the result
+    async fn fire_and_forget(&self, message: ClientMessages) -> Result<()> {
+        let (tx, _) = oneshot::channel();
+        self.message_send
+            .send(ClientMessageRequest {
+                message,
+                response_channel: tx,
+            })
+            .await?;
+        Ok(())
     }
 
     /// Leave the room, consumes this object
-    pub fn leave_room(self) -> anyhow::Result<usize> {
-        Ok(self.message_send.send(ClientMessages::RoomStateChange((
+    pub async fn leave_room(self) -> anyhow::Result<()> {
+        self.fire_and_forget(ClientMessages::RoomStateChange((
             self.winner.clone(),
             StateChange::Leave,
-        )))?)
+        )))
+        .await?;
+        Ok(())
     }
 
     /// Start a vote
-    pub fn start_vote(&self, story: &Story) -> Result<()> {
-        self.send_client_message(ClientMessages::StartVote(story.clone()))?;
+    pub async fn start_vote(&self, story: &Story) -> Result<()> {
+        self.send_client_request(ClientMessages::StartVote(story.clone()))
+            .await?;
         Ok(())
     }
 
     /// Cast a vote
-    pub fn cast_vote(&self, story: &Story, points: StoryPoints) -> Result<()> {
-        self.send_client_message(ClientMessages::Vote((
+    pub async fn cast_vote(&self, story: &Story, points: StoryPoints) -> Result<()> {
+        self.send_client_request(ClientMessages::Vote((
             self.winner.clone(),
             story.clone(),
             points.clone(),
-        )))?;
+        )))
+        .await?;
         Ok(())
     }
 
+    /// Receive a server message
     pub async fn receive_message(&mut self) -> ServerMessages {
         self.message_receive
             .recv()
             .await
             .expect("Could not receive server message")
+    }
+
+    /// Skip messages
+    pub async fn skip_messages(&mut self, count: usize) -> Result<()> {
+        for _ in 0..count {
+            self.message_receive.recv().await?;
+        }
+        Ok(())
     }
 }
 
@@ -513,6 +583,7 @@ mod tests {
         // I leave the room
         winner_communication
             .leave_room()
+            .await
             .expect("Could not leave room");
 
         // I receive a room leave message
@@ -542,6 +613,12 @@ mod tests {
         }
     }
 
+    macro_rules! await_and_msg {
+        ($a:expr, $p:pat) => {
+            assert!(matches!($a.await, $p))
+        };
+    }
+
     #[tokio::test]
     pub async fn test_voting_single() {
         let TestSetup {
@@ -551,47 +628,50 @@ mod tests {
         } = setup_test().await;
 
         // Rival leaves room
-        rival_communication.leave_room().unwrap();
+        rival_communication.leave_room().await.unwrap();
 
-        // Skip 2 messages, leaving and leadership change
-        let _ = winner_communication.receive_message().await;
-        let _ = winner_communication.receive_message().await;
+        // Skip 2 messages, containing leaving and leadership change
+        winner_communication.skip_messages(2).await.unwrap();
 
         let story = Story::new(StoryId(0), "New story");
 
-        winner_communication.start_vote(&story).unwrap();
-
-        let msg = winner_communication.receive_message().await;
+        winner_communication.start_vote(&story).await.unwrap();
 
         // We should receive a message that the room state has changed
-        assert!(matches!(
-            msg,
+        await_and_msg!(
+            winner_communication.receive_message(),
             ServerMessages::RoomStateChange(RoomStateChange::Voting)
-        ));
+        );
 
-        let msg = winner_communication.receive_message().await;
-
-        // We should receive a message that the room state has changed
-        assert!(matches!(msg, ServerMessages::StartVote(_)));
+        // We should receive a message that a vote has been started
+        await_and_msg!(
+            winner_communication.receive_message(),
+            ServerMessages::StartVote(_)
+        );
 
         // Cast a vote
         winner_communication
             .cast_vote(&story, StoryPoints::ONE)
+            .await
             .unwrap();
 
-        // Because there is only a single voter we should get the result
-        let msg = winner_communication.receive_message().await;
+        // We should receive a message that our vote has been cast
+        await_and_msg!(
+            winner_communication.receive_message(),
+            ServerMessages::VoteCast(_)
+        );
 
         // We should receive a message that the room state has changed
-        assert!(matches!(msg, ServerMessages::VotesReceived(_)));
-
+        await_and_msg!(
+            winner_communication.receive_message(),
+            ServerMessages::VotesReceived(_)
+        );
         // And room should go back to idle
         // We should receive a message that the room state has changed
-        let msg = winner_communication.receive_message().await;
-        assert!(matches!(
-            msg,
+        await_and_msg!(
+            winner_communication.receive_message(),
             ServerMessages::RoomStateChange(RoomStateChange::Idle)
-        ));
+        );
     }
 
     // TODO: Create test for multiple votes + fight
