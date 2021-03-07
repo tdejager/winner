@@ -30,7 +30,12 @@ pub enum ServerMessages {
     StartVote(Story),
     /// Vote has finished
     VotesReceived(HashMap<Winner, StoryPoints>),
+    /// Ok Response to a ClientMessage request
+    ServerOk(),
+    /// Err Response to a ClientMessage request
+    ServerErr(String)
 }
+
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 /// Messages that are received by the server

@@ -1,20 +1,21 @@
 mod client_handler;
 mod messages;
 mod room;
+mod room_communication;
 mod types;
 
 use std::env;
 
-use crate::types::Winner;
+use crate::client_handler::ClientHandler;
+use crate::room_communication::RoomSubscriber;
 use futures::prelude::*;
-use room::RoomCommunication;
 use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio_serde::formats::*;
 use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
 
 /// Communicate with the room over TCP
-async fn tcp_room(communication: RoomCommunication) -> anyhow::Result<()> {
+async fn tcp_room(room_subscriber: RoomSubscriber) -> anyhow::Result<()> {
     // Parse the arguments, bind the TCP socket we'll be listening to, spin up
     // our worker threads, and start shipping sockets to those worker threads.
     let addr = env::args()
@@ -25,26 +26,16 @@ async fn tcp_room(communication: RoomCommunication) -> anyhow::Result<()> {
         .expect("Could not open server");
 
     loop {
+        let cloned_subscriber = room_subscriber.clone();
         // Split into a read and a write part
-        let (incoming_messages, _outgoing_messages) = server.accept().await.unwrap().0.into_split();
-
-        // Delimit frames using a length header
-        let length_delimited = FramedRead::new(incoming_messages, LengthDelimitedCodec::new());
-
-        // Deserialize frames
-        let mut message_stream = tokio_serde::SymmetricallyFramed::new(
-            length_delimited,
-            SymmetricalJson::<Value>::default(),
-        );
-
-        let communication_clone = communication.clone();
-
-        // Spawn a task that prints all received messages to STDOUT
+        let (incoming_messages, outgoing_messages) = server.accept().await.unwrap().0.into_split();
+        // Spawn a task that handles this connection
         tokio::spawn(async move {
-            while let Some(msg) = message_stream.try_next().await.unwrap() {
-                // Just print for now
-                println!("GOT: {:?}", msg);
-            }
+            let client_handler = ClientHandler::new(cloned_subscriber);
+            client_handler
+                .run(incoming_messages, outgoing_messages)
+                .await
+                .expect("Error while running the client_handler")
         });
     }
 }
@@ -52,13 +43,11 @@ async fn tcp_room(communication: RoomCommunication) -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() {
     // Setup a single room
-    let (mut room, communication) = room::setup_room();
+    let (mut room, communication) = room_communication::setup_room();
 
-    // Create a new room
+    // Create a new room, the only one for now
     tokio::spawn(async move { room.run().await });
-
-    // TODO: create a server here that accepts a tcp connection, should block here
-    // TODO: Handle subscribes from the tcp and communicate with the room
-    // TODO: Initially just create something that subscribes
-    tcp_room(communication).await;
+    tcp_room(communication)
+        .await
+        .expect("Error while running room task");
 }
