@@ -127,7 +127,7 @@ impl ClientHandler {
             MessageStreamRead::new(length_delimited_read, SymmetricalJson::<Value>::default());
 
         // Wait for subscription first, this is the first message we should receive
-        let (room_api, state_updater, _initial_state) =
+        let (room_api, _state_updater, _initial_state) =
             self.wait_on_subscription(&mut read_message_stream).await?;
 
         // And a write part, which needs to be wrapped in a mutex, because two tasks will be able to write
