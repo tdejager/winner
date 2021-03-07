@@ -65,7 +65,7 @@ pub struct ClientMessageRequest {
 /// Implementation of a room
 pub struct Room {
     current_state: RoomState,
-    /// Current paricipants in the room
+    /// Current participants in the room
     participants: HashSet<Winner>,
     /// Incoming message that need to be processed
     incoming: mpsc::Receiver<ClientMessageRequest>,
@@ -124,11 +124,17 @@ impl Room {
             }
 
             // Send the subscription response
-            SubscriptionResponse::Ok(SubscriptionData {
+            let response = SubscriptionResponse::Ok(SubscriptionData {
                 message_receive: self.outgoing.subscribe(),
                 winners,
                 leader: self.leader.clone(),
-            })
+            });
+
+            // Broadcast that someone has entered, do this after creating the response or the
+            // subscriber misses the message
+            self.send_server_message(ServerMessages::RoomParticipantsChange((subscription_request.winner.clone(), StateChange::Enter)));
+
+            response
         } else {
             SubscriptionResponse::WinnerExists
         }

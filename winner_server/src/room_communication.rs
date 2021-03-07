@@ -172,6 +172,14 @@ impl RoomStateUpdater {
         }
         Ok(())
     }
+
+    /// Skip messages but also debug print each message
+    pub async fn skip_and_debug_messages(&mut self, count: usize) -> anyhow::Result<()> {
+        for _ in 0..count {
+            dbg!(self.message_receive.recv().await?);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -209,16 +217,20 @@ mod tests {
         let _room_handle = tokio::spawn(async move { room.run().await });
 
         // Try to create a subscription
-        let (winner_api, winner_state_update, ..) = room_communication
+        let (winner_api, mut winner_state_update, ..) = room_communication
             .subscribe(&winner)
             .await
             .expect("Could not subscribe winner");
 
         // Try to create another, subscription
-        let (rival_api, rival_state_update, ..) = room_communication
+        let (rival_api, mut rival_state_update, ..) = room_communication
             .subscribe(&rival)
             .await
             .expect("Could not subscribe rival");
+
+        // Skip rival and winner entering room
+        winner_state_update.skip_messages(1).await.unwrap();
+        rival_state_update.skip_messages(1).await.unwrap();
 
         TestSetup {
             winner_api,
@@ -228,6 +240,13 @@ mod tests {
             _room_communication: room_communication,
             _room_handle,
         }
+    }
+
+    /// Await message and check if it is the correct type
+    macro_rules! await_and_msg {
+        ($a:expr, $p:pat) => {
+            assert!(matches!($a.await, $p))
+        };
     }
 
     #[tokio::test]
@@ -244,8 +263,9 @@ mod tests {
         let _ = communication.subscribe(&winner).await.unwrap();
 
         // Try to create another, subscription
-        let (_, _, initial_state) = communication.subscribe(&rival).await.unwrap();
+        let (_, mut state_update, initial_state) = communication.subscribe(&rival).await.unwrap();
 
+        // Check initial state
         assert!(initial_state.winners.contains(&rival));
 
         // We expect a leader to be set to the first person in the room
@@ -253,6 +273,9 @@ mod tests {
             initial_state.leader.expect("Expected leader to be set"),
             winner
         );
+
+        // I get a message that I have entered
+        await_and_msg!(state_update.receive_message(), ServerMessages::RoomParticipantsChange(_));
     }
 
     #[tokio::test]
@@ -294,12 +317,6 @@ mod tests {
         }
     }
 
-    /// Await message and check if it is the correct type
-    macro_rules! await_and_msg {
-        ($a:expr, $p:pat) => {
-            assert!(matches!($a.await, $p))
-        };
-    }
 
     #[tokio::test]
     pub async fn test_voting_single() {
@@ -313,8 +330,8 @@ mod tests {
         // Rival leaves room
         rival_api.leave_room().await.unwrap();
 
-        // Skip 2 messages, containing leaving and leadership change
-        winner_state_update.skip_messages(2).await.unwrap();
+        // Skip 2 messages, containing enter, leaving and leadership change
+        winner_state_update.skip_messages(3).await.unwrap();
 
         let story = Story::new(StoryId(0), "New story");
 
