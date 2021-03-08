@@ -33,7 +33,9 @@ type MessageStreamWrite = tokio_serde::SymmetricallyFramed<
 impl ClientHandler {
     /// Returns a new client handler
     pub fn new(room_subscriber: RoomSubscriber) -> Self {
-        Self { room_communication: room_subscriber }
+        Self {
+            room_communication: room_subscriber,
+        }
     }
 
     /// Wait for subscription method and then subscribe to the room
@@ -108,7 +110,7 @@ impl ClientHandler {
         }
 
         // If we come here, out stream is closed but we still need to tell the room we have left
-        room_api.leave_room().await;
+        room_api.leave_room().await?;
         Ok(())
     }
 
@@ -148,3 +150,10 @@ impl ClientHandler {
         Ok(())
     }
 }
+
+//#[cfg(test)]
+//mod tests {
+//use crate::room_communication::setup_room;
+
+//async fn setup_test() {}
+//}
