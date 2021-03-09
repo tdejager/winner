@@ -55,11 +55,18 @@ async fn main() {
 mod tests {
     use std::net::SocketAddr;
 
-    use futures::Future;
+    use futures::{Future, SinkExt, StreamExt};
     use tokio::net::TcpListener;
     use tokio::net::TcpStream;
+    use tokio_serde::formats::SymmetricalJson;
+    use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
-    use crate::{room_communication, tcp_room};
+    use crate::{
+        client_handler::{MessageStreamRead, MessageStreamWrite},
+        messages::ClientMessages,
+        room_communication, tcp_room,
+        types::Winner,
+    };
 
     async fn setup_tcp_room() -> (
         std::net::SocketAddr,
@@ -79,17 +86,40 @@ mod tests {
         (local_addr, tcp_room(server, communication))
     }
 
-    async fn setup_client(addr: SocketAddr) -> TcpStream {
-        TcpStream::connect(addr)
+    async fn setup_client(addr: SocketAddr) -> (MessageStreamRead, MessageStreamWrite) {
+        let (read_part, write_part) = TcpStream::connect(addr)
             .await
             .expect("Could not connect to server")
+            .into_split();
+
+        let length_delimited_write = FramedWrite::new(write_part, LengthDelimitedCodec::new());
+        let writer = MessageStreamWrite::new(length_delimited_write, SymmetricalJson::default());
+
+        let length_delimited_read = FramedRead::new(read_part, LengthDelimitedCodec::new());
+        let reader = MessageStreamRead::new(length_delimited_read, SymmetricalJson::default());
+
+        (reader, writer)
     }
 
     #[tokio::test]
     async fn test_subscribe() {
         let (addr, tcp_room) = setup_tcp_room().await;
-        let client = setup_client(addr).await;
+        let (mut reader, mut writer) = setup_client(addr).await;
 
-        // TODO send subscribe message here and await correct response
+        // Spawn the room
+        tokio::spawn(async move { tcp_room.await.expect("Error in room") });
+
+        let winner = Winner("Me".into());
+
+        let enter_message =
+            ClientMessages::RoomStateChange((winner, crate::messages::StateChange::Enter));
+
+        // Write enter message
+        writer
+            .send(serde_json::to_value(enter_message).unwrap())
+            .await
+            .expect("Could not send subscription message");
+
+        dbg!(reader.next().await);
     }
 }

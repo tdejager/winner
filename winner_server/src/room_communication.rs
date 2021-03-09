@@ -83,11 +83,6 @@ pub struct RoomAPI {
     pub message_send: mpsc::Sender<ClientMessageRequest>,
 }
 
-/// This struct is used to receive state
-pub struct RoomStateUpdater {
-    pub message_receive: broadcast::Receiver<ServerMessages>,
-}
-
 impl RoomAPI {
     pub fn new(winner: Winner, message_send: mpsc::Sender<ClientMessageRequest>) -> Self {
         Self {
@@ -152,17 +147,19 @@ impl RoomAPI {
     }
 }
 
+/// This struct is used to receive state
+pub struct RoomStateUpdater {
+    pub message_receive: broadcast::Receiver<ServerMessages>,
+}
+
 impl RoomStateUpdater {
     pub fn new(message_receive: broadcast::Receiver<ServerMessages>) -> Self {
         Self { message_receive }
     }
 
     /// Receives a server message
-    pub async fn receive_message(&mut self) -> ServerMessages {
-        self.message_receive
-            .recv()
-            .await
-            .expect("Could not receive server message")
+    pub async fn receive_message(&mut self) -> anyhow::Result<ServerMessages> {
+        Ok(self.message_receive.recv().await?)
     }
 
     /// Skip messages
@@ -245,7 +242,7 @@ mod tests {
     /// Await message and check if it is the correct type
     macro_rules! await_and_msg {
         ($a:expr, $p:pat) => {
-            assert!(matches!($a.await, $p))
+            assert!(matches!($a.await.unwrap(), $p))
         };
     }
 
@@ -275,7 +272,10 @@ mod tests {
         );
 
         // I get a message that I have entered
-        await_and_msg!(state_update.receive_message(), ServerMessages::RoomParticipantsChange(_));
+        await_and_msg!(
+            state_update.receive_message(),
+            ServerMessages::RoomParticipantsChange(_)
+        );
     }
 
     #[tokio::test]
@@ -291,7 +291,7 @@ mod tests {
         winner_api.leave_room().await.expect("Could not leave room");
 
         // I receive a room leave message
-        let msg = rival_state_update.receive_message().await;
+        let msg = rival_state_update.receive_message().await.unwrap();
 
         if let ServerMessages::RoomParticipantsChange(change) = msg {
             let (winner, state_change) = change;
@@ -316,7 +316,6 @@ mod tests {
             panic!("Wrong message type received {:?}", msg);
         }
     }
-
 
     #[tokio::test]
     pub async fn test_voting_single() {

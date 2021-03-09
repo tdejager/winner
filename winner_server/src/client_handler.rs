@@ -17,18 +17,87 @@ pub struct ClientHandler {
 }
 
 /// This represents a message stream
-type MessageStreamRead = tokio_serde::SymmetricallyFramed<
+pub type MessageStreamRead = tokio_serde::SymmetricallyFramed<
     FramedRead<OwnedReadHalf, LengthDelimitedCodec>,
     Value,
     SymmetricalJson<Value>,
 >;
 
 /// This represents a message stream
-type MessageStreamWrite = tokio_serde::SymmetricallyFramed<
+pub type MessageStreamWrite = tokio_serde::SymmetricallyFramed<
     FramedWrite<OwnedWriteHalf, LengthDelimitedCodec>,
     Value,
     SymmetricalJson<Value>,
 >;
+
+/// Receives client messages, passes them to the server and send back the response
+async fn message_handler(
+    room_api: RoomAPI,
+    mut read_message_stream: MessageStreamRead,
+    write_message_stream: Arc<Mutex<MessageStreamWrite>>,
+) -> anyhow::Result<()> {
+    // Receive messages
+    while let Some(msg) = read_message_stream.next().await {
+        let msg = msg?;
+        let client_message: ClientMessages = serde_json::from_value(msg)?;
+
+        // Dispatch these correctly
+        let result = match client_message {
+            ClientMessages::RoomStateChange((_winner, change)) => match change {
+                // Explicit leave message received
+                StateChange::Leave => return room_api.leave_room().await,
+                StateChange::Leader => {
+                    unimplemented!()
+                }
+                // This cannot be sent again
+                StateChange::Enter => Err(anyhow::anyhow!("Incorrect message")),
+            },
+            ClientMessages::AcknowledgeLeader(_) => {
+                unimplemented!()
+            }
+            ClientMessages::StartVote(story) => room_api.start_vote(&story).await,
+            ClientMessages::Vote((_winner, story, points)) => {
+                room_api.cast_vote(&story, points).await
+            }
+            ClientMessages::FightResolved => {
+                unimplemented!()
+            }
+        };
+
+        // Convert the response
+        let response = result.map_or_else(
+            |e| ServerMessages::ServerErr(format!("{}", e)),
+            |_| ServerMessages::ServerOk(),
+        );
+
+        // And handle the result
+        write_message_stream
+            .lock()
+            .await
+            .send(serde_json::to_value(response)?)
+            .await?;
+    }
+
+    // If we come here, out stream is closed but we still need to tell the room we have left
+    room_api.leave_room().await?;
+    Ok(())
+}
+
+/// Receives room messages and forwards these to the client
+async fn room_updates(
+    mut state_update: RoomStateUpdater,
+    write_message_stream: Arc<Mutex<MessageStreamWrite>>,
+) -> anyhow::Result<()> {
+    loop {
+        let room_message = state_update.receive_message().await?;
+
+        write_message_stream
+            .lock()
+            .await
+            .send(serde_json::to_value(room_message)?)
+            .await?;
+    }
+}
 
 impl ClientHandler {
     /// Returns a new client handler
@@ -61,59 +130,6 @@ impl ClientHandler {
         anyhow::bail!("No subscription received")
     }
 
-    /// Receives client messages, passes them to the server and send back the response
-    async fn message_handler(
-        room_api: RoomAPI,
-        mut read_message_stream: MessageStreamRead,
-        write_message_stream: Arc<Mutex<MessageStreamWrite>>,
-    ) -> anyhow::Result<()> {
-        // Receive messages
-        while let Some(msg) = read_message_stream.next().await {
-            let msg = msg?;
-            let client_message: ClientMessages = serde_json::from_value(msg)?;
-
-            // Dispatch these correctly
-            let result = match client_message {
-                ClientMessages::RoomStateChange((_winner, change)) => match change {
-                    // Explicit leave message received
-                    StateChange::Leave => return room_api.leave_room().await,
-                    StateChange::Leader => {
-                        unimplemented!()
-                    }
-                    // This cannot be sent again
-                    StateChange::Enter => Err(anyhow::anyhow!("Incorrect message")),
-                },
-                ClientMessages::AcknowledgeLeader(_) => {
-                    unimplemented!()
-                }
-                ClientMessages::StartVote(story) => room_api.start_vote(&story).await,
-                ClientMessages::Vote((_winner, story, points)) => {
-                    room_api.cast_vote(&story, points).await
-                }
-                ClientMessages::FightResolved => {
-                    unimplemented!()
-                }
-            };
-
-            // Convert the response
-            let response = result.map_or_else(
-                |e| ServerMessages::ServerErr(format!("{}", e)),
-                |_| ServerMessages::ServerOk(),
-            );
-
-            // And handle the result
-            write_message_stream
-                .lock()
-                .await
-                .send(serde_json::to_value(response)?)
-                .await?;
-        }
-
-        // If we come here, out stream is closed but we still need to tell the room we have left
-        room_api.leave_room().await?;
-        Ok(())
-    }
-
     /// Run the client connection
     pub async fn run(
         &self,
@@ -129,7 +145,7 @@ impl ClientHandler {
             MessageStreamRead::new(length_delimited_read, SymmetricalJson::<Value>::default());
 
         // Wait for subscription first, this is the first message we should receive
-        let (room_api, _state_updater, _initial_state) =
+        let (room_api, state_updater, _initial_state) =
             self.wait_on_subscription(&mut read_message_stream).await?;
 
         // And a write part, which needs to be wrapped in a mutex, because two tasks will be able to write
@@ -138,22 +154,14 @@ impl ClientHandler {
             SymmetricalJson::<Value>::default(),
         )));
 
-        // TODO still requires a part that handles the server updates
-        // TODO change this to a join
-        tokio::try_join!(ClientHandler::message_handler(
-            room_api,
-            read_message_stream,
-            write_message_stream.clone()
-        ))?;
+        tokio::try_join!(
+            // Handle client messages forward them to the room
+            message_handler(room_api, read_message_stream, write_message_stream.clone()),
+            // Handle room messages forward these to the client
+            room_updates(state_updater, write_message_stream)
+        )?;
 
         // We are done
         Ok(())
     }
 }
-
-//#[cfg(test)]
-//mod tests {
-//use crate::room_communication::setup_room;
-
-//async fn setup_test() {}
-//}
