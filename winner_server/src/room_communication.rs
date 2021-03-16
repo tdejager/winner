@@ -1,4 +1,4 @@
-use crate::messages::{ClientMessages, ServerMessages, StateChange};
+use crate::messages::{ClientMessages, RoomInitialState, ServerMessages};
 use crate::room::{
     ClientMessageRequest, Room, SubscriptionRequest, SubscriptionResponse, CHANNEL_SIZE,
 };
@@ -12,11 +12,6 @@ pub struct RoomSubscriber {
     pub client_sender: mpsc::Sender<ClientMessageRequest>,
     /// Sender to try to get a subscription to the room
     pub subscription_sender: mpsc::Sender<SubscriptionRequest>,
-}
-
-pub struct RoomInitialState {
-    pub winners: Vec<Winner>,
-    pub leader: Option<Winner>,
 }
 
 impl RoomSubscriber {
@@ -120,11 +115,8 @@ impl RoomAPI {
 
     /// Leave the room, consumes this object
     pub async fn leave_room(self) -> anyhow::Result<()> {
-        self.fire_and_forget(ClientMessages::RoomStateChange((
-            self.winner.clone(),
-            StateChange::Leave,
-        )))
-        .await?;
+        self.fire_and_forget(ClientMessages::LeaveRoom(self.winner.clone()))
+            .await?;
         Ok(())
     }
 

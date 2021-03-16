@@ -132,7 +132,10 @@ impl Room {
 
             // Broadcast that someone has entered, do this after creating the response or the
             // subscriber misses the message
-            self.send_server_message(ServerMessages::RoomParticipantsChange((subscription_request.winner.clone(), StateChange::Enter)));
+            self.send_server_message(ServerMessages::RoomParticipantsChange((
+                subscription_request.winner.clone(),
+                StateChange::Enter,
+            )));
 
             response
         } else {
@@ -220,11 +223,8 @@ impl Room {
                     println!("Processing server messages");
                     let response_channel = msg.response_channel;
                     match msg.message {
-                        ClientMessages::RoomStateChange((winner, change)) => match change {
-                            // Leaving room, so unsubscribe
-                            StateChange::Leave => self.unsubscribe(&winner),
-                            _ => {}
-                        },
+                        ClientMessages::LeaveRoom(winner) => self.unsubscribe(&winner),
+
                         // A new vote is requested
                         ClientMessages::StartVote(story) => {
                             response_channel.send(Ok(())).expect("Could not send 'StartVote' result");
@@ -271,11 +271,11 @@ impl Room {
                         .expect("Could not send response");
                     self.send_server_message(ServerMessages::VoteCast((winner, story_points)));
                 }
-                ClientMessages::RoomStateChange((winner, change)) => match change {
-                    // Leaving room, so unsubscribe, we do not need to include participant for the count
-                    StateChange::Leave => self.unsubscribe(&winner),
-                    _ => {}
-                },
+                ClientMessages::LeaveRoom(winner) =>
+                // Leaving room, so unsubscribe, we do not need to include participant for the count
+                {
+                    self.unsubscribe(&winner)
+                }
 
                 // Other messages cannot be processed in this state
                 _ => response_channel
@@ -322,13 +322,10 @@ impl Room {
                     } = self.receive_incoming_messages().await;
                     match message {
                         ClientMessages::FightResolved => fight_resolved = true,
-                        ClientMessages::RoomStateChange((winner, change)) => match change {
+                        ClientMessages::LeaveRoom(winner) => {
                             // Leaving room, so unsubscribe, we do not need to include participant for the count
-                            StateChange::Leave => self.unsubscribe(&winner),
-                            _ => response_channel
-                                .send(Err(anyhow::anyhow!("Can't process this RoomStateChange")))
-                                .expect("Could not sends message"),
-                        },
+                            self.unsubscribe(&winner)
+                        }
                         _ => response_channel
                             .send(Err(anyhow::anyhow!(
                                 "Can't process this message when in 'Fighting' state"

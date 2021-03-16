@@ -15,6 +15,12 @@ pub enum RoomStateChange {
     Idle,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RoomInitialState {
+    pub winners: Vec<Winner>,
+    pub leader: Option<Winner>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 /// Messages that are sent by the server
 pub enum ServerMessages {
@@ -30,17 +36,21 @@ pub enum ServerMessages {
     StartVote(Story),
     /// Vote has finished
     VotesReceived(HashMap<Winner, StoryPoints>),
+    /// Initial state
+    InitialState(RoomInitialState),
     /// Ok Response to a ClientMessage request
     ServerOk(),
     /// Err Response to a ClientMessage request
-    ServerErr(String)
+    ServerErr(String),
 }
-
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 /// Messages that are received by the server
 pub enum ClientMessages {
-    RoomStateChange((Winner, StateChange)),
+    /// Want to enter the room
+    EnterRoom(Winner),
+    /// Leave the room
+    LeaveRoom(Winner),
     /// Reply to acknowledge the leader
     AcknowledgeLeader(bool),
     /// Sent when a vote has to be done for a story

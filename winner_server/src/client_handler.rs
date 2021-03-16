@@ -1,14 +1,9 @@
-#![allow(dead_code)]
-use crate::messages::StateChange;
 use crate::messages::{ClientMessages, ServerMessages};
-use crate::room_communication::{RoomAPI, RoomInitialState, RoomStateUpdater, RoomSubscriber};
+use crate::messages::RoomInitialState;
+use crate::room_communication::{RoomAPI, RoomStateUpdater, RoomSubscriber};
+use crate::util::*;
 use futures::{SinkExt, StreamExt};
-use serde_json::Value;
-use std::sync::Arc;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::Mutex;
-use tokio_serde::formats::*;
-use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 /// Handles the connections to the client
 pub struct ClientHandler {
@@ -16,25 +11,12 @@ pub struct ClientHandler {
     room_communication: RoomSubscriber,
 }
 
-/// This represents a message stream
-pub type MessageStreamRead = tokio_serde::SymmetricallyFramed<
-    FramedRead<OwnedReadHalf, LengthDelimitedCodec>,
-    Value,
-    SymmetricalJson<Value>,
->;
-
-/// This represents a message stream
-pub type MessageStreamWrite = tokio_serde::SymmetricallyFramed<
-    FramedWrite<OwnedWriteHalf, LengthDelimitedCodec>,
-    Value,
-    SymmetricalJson<Value>,
->;
 
 /// Receives client messages, passes them to the server and send back the response
 async fn message_handler(
     room_api: RoomAPI,
     mut read_message_stream: MessageStreamRead,
-    write_message_stream: Arc<Mutex<MessageStreamWrite>>,
+    write_message_stream: SharedStreamWrite,
 ) -> anyhow::Result<()> {
     // Receive messages
     while let Some(msg) = read_message_stream.next().await {
@@ -43,15 +25,6 @@ async fn message_handler(
 
         // Dispatch these correctly
         let result = match client_message {
-            ClientMessages::RoomStateChange((_winner, change)) => match change {
-                // Explicit leave message received
-                StateChange::Leave => return room_api.leave_room().await,
-                StateChange::Leader => {
-                    unimplemented!()
-                }
-                // This cannot be sent again
-                StateChange::Enter => Err(anyhow::anyhow!("Incorrect message")),
-            },
             ClientMessages::AcknowledgeLeader(_) => {
                 unimplemented!()
             }
@@ -62,6 +35,8 @@ async fn message_handler(
             ClientMessages::FightResolved => {
                 unimplemented!()
             }
+            // Ignore the other messages
+            _ => Ok(()),
         };
 
         // Convert the response
@@ -86,7 +61,7 @@ async fn message_handler(
 /// Receives room messages and forwards these to the client
 async fn room_updates(
     mut state_update: RoomStateUpdater,
-    write_message_stream: Arc<Mutex<MessageStreamWrite>>,
+    write_message_stream: SharedStreamWrite,
 ) -> anyhow::Result<()> {
     loop {
         let room_message = state_update.receive_message().await?;
@@ -97,6 +72,21 @@ async fn room_updates(
             .send(serde_json::to_value(room_message)?)
             .await?;
     }
+}
+
+/// Write the intial state
+async fn write_initial_state(
+    write_message_stream: &SharedStreamWrite,
+    initial_state: RoomInitialState,
+) -> anyhow::Result<()> {
+    write_message_stream
+        .lock()
+        .await
+        .send(serde_json::to_value(ServerMessages::InitialState(
+            initial_state,
+        ))?)
+        .await?;
+    Ok(())
 }
 
 impl ClientHandler {
@@ -112,17 +102,15 @@ impl ClientHandler {
         &self,
         message_stream: &mut MessageStreamRead,
     ) -> anyhow::Result<(RoomAPI, RoomStateUpdater, RoomInitialState)> {
+        // Wait for subscription method
         while let Some(msg) = message_stream.next().await {
             let msg = msg?;
             let client_message: ClientMessages = serde_json::from_value(msg)?;
 
             // See if this is a subscription message
-            if let ClientMessages::RoomStateChange(room_message) = client_message {
-                let (winner, state_change) = room_message;
-                if state_change == StateChange::Enter {
-                    // Subscribe to room
-                    return self.room_communication.subscribe(&winner).await;
-                }
+            if let ClientMessages::EnterRoom(winner) = client_message {
+                // Subscribe to room
+                return self.room_communication.subscribe(&winner).await;
             }
         }
 
@@ -136,24 +124,20 @@ impl ClientHandler {
         read_half: OwnedReadHalf,
         write_half: OwnedWriteHalf,
     ) -> anyhow::Result<()> {
-        // Create a read and write frame that is delimited by length
-        let length_delimited_read = FramedRead::new(read_half, LengthDelimitedCodec::new());
-        let length_delimited_write = FramedWrite::new(write_half, LengthDelimitedCodec::new());
 
         // Create a read part
-        let mut read_message_stream =
-            MessageStreamRead::new(length_delimited_read, SymmetricalJson::<Value>::default());
-
+        let mut read_message_stream = create_read_stream(read_half);
         // Wait for subscription first, this is the first message we should receive
-        let (room_api, state_updater, _initial_state) =
+        let (room_api, state_updater, initial_state) =
             self.wait_on_subscription(&mut read_message_stream).await?;
 
         // And a write part, which needs to be wrapped in a mutex, because two tasks will be able to write
-        let write_message_stream = Arc::new(Mutex::new(MessageStreamWrite::new(
-            length_delimited_write,
-            SymmetricalJson::<Value>::default(),
-        )));
+        let write_message_stream = create_shared_write_stream(write_half);
 
+        // Write the initial state back to the client
+        write_initial_state(&write_message_stream, initial_state).await?;
+
+        // This will run the rest of the time
         tokio::try_join!(
             // Handle client messages forward them to the room
             message_handler(room_api, read_message_stream, write_message_stream.clone()),
