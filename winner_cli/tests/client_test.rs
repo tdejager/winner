@@ -29,5 +29,7 @@ async fn client_subcribe() {
     let winner = Winner("Me".into());
 
     // Try to connect
-    client::connect_and_subscribe(&winner, address).await.expect("Could not connect to server");
+    client::connect_and_subscribe(&winner, address)
+        .await
+        .expect("Could not connect to server");
 }

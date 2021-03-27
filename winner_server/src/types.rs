@@ -1,9 +1,17 @@
 use serde_derive::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
+use std::fmt::Formatter;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 /// The people that we call winners that are in the room
 pub struct Winner(pub String);
+
+impl fmt::Display for Winner {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Room {
@@ -20,7 +28,7 @@ pub struct Room {
 #[derive(Serialize, Deserialize, PartialEq, Eq, Hash, Debug, Clone)]
 pub struct StoryId(pub usize);
 
-#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq, Hash)]
 pub struct Story {
     pub id: StoryId,
     pub title: String,
@@ -35,7 +43,7 @@ impl Story {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub enum StoryPoints {
     ONE = 1,
     TWO = 2,

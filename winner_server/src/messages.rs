@@ -15,7 +15,7 @@ pub enum RoomStateChange {
     Idle,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct RoomInitialState {
     pub winners: Vec<Winner>,
     pub leader: Option<Winner>,

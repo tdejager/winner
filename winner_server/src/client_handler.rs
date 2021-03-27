@@ -1,5 +1,5 @@
-use crate::messages::{ClientMessages, ServerMessages};
 use crate::messages::RoomInitialState;
+use crate::messages::{ClientMessages, ServerMessages};
 use crate::room_communication::{RoomAPI, RoomStateUpdater, RoomSubscriber};
 use crate::util::*;
 use futures::{SinkExt, StreamExt};
@@ -10,7 +10,6 @@ pub struct ClientHandler {
     // Used to setup communication with the room
     room_communication: RoomSubscriber,
 }
-
 
 /// Receives client messages, passes them to the server and send back the response
 async fn message_handler(
@@ -124,7 +123,6 @@ impl ClientHandler {
         read_half: OwnedReadHalf,
         write_half: OwnedWriteHalf,
     ) -> anyhow::Result<()> {
-
         // Create a read part
         let mut read_message_stream = create_read_stream(read_half);
         // Wait for subscription first, this is the first message we should receive
