@@ -228,6 +228,7 @@ impl Room {
                         // A new vote is requested
                         ClientMessages::StartVote(story) => {
                             response_channel.send(Ok(())).expect("Could not send 'StartVote' result");
+                            // TODO do a leader check here
                             self.send_server_message(ServerMessages::RoomStateChange(RoomStateChange::Voting));
                             self.current_state = RoomState::Voting(CurrentVote::new(&story));
                         }
@@ -304,6 +305,7 @@ impl Room {
             if highest_entry.is_some() && lowest_entry.is_some() {
                 let highest_winner = highest_entry.unwrap().0;
                 let lowest_winner = lowest_entry.unwrap().0;
+
                 // Send out a fight message
                 self.send_server_message(ServerMessages::Fight((
                     highest_entry.unwrap().0.clone(),
@@ -321,7 +323,13 @@ impl Room {
                         response_channel,
                     } = self.receive_incoming_messages().await;
                     match message {
-                        ClientMessages::FightResolved => fight_resolved = true,
+                        ClientMessages::FightResolved => {
+                            fight_resolved = true;
+                            response_channel
+                                .send(Ok(()))
+                                .expect("Could not send response");
+                            self.send_server_message(ServerMessages::FightResolved);
+                        }
                         ClientMessages::LeaveRoom(winner) => {
                             // Leaving room, so unsubscribe, we do not need to include participant for the count
                             self.unsubscribe(&winner)
