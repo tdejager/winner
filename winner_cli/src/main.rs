@@ -1,6 +1,6 @@
 use std::env;
-use winner_server::types::Winner;
 use winner_cli::client;
+use winner_server::types::Winner;
 
 #[tokio::main]
 async fn main() {
