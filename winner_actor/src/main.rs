@@ -1,6 +1,5 @@
 mod messages;
 
-use crate::messages::client::StartVote;
 use crate::messages::server::RoomStateChanged;
 use actix::prelude::*;
 use rand::seq::IteratorRandom;
@@ -89,7 +88,7 @@ impl Handler<messages::client::Enter> for Room {
 impl Handler<messages::client::Leave> for Room {
     type Result = anyhow::Result<()>;
 
-    fn handle(&mut self, msg: messages::client::Leave, ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: messages::client::Leave, _ctx: &mut Self::Context) -> Self::Result {
         if !self.winners.contains_key(&msg.winner) {
             anyhow::bail!("cannot remove unknown winner '{}'", msg.winner);
         }
@@ -106,8 +105,8 @@ impl Handler<messages::client::RestartVote> for Room {
 
     fn handle(
         &mut self,
-        msg: messages::client::RestartVote,
-        ctx: &mut Self::Context,
+        _msg: messages::client::RestartVote,
+        _ctx: &mut Self::Context,
     ) -> Self::Result {
         match &mut self.voting_state {
             RoomVotingState::Idle => {
@@ -276,16 +275,13 @@ fn main() {
 #[cfg(test)]
 mod test {
     use crate::messages::client;
-    use crate::messages::client::Enter;
     use crate::messages::server::RoomStateChanged;
-    use crate::{Room, RoomState};
-    use actix::dev::MessageResponse;
+    use crate::{Room, RoomState, RoomVotingState};
     use actix::{
         Actor, ActorContext, ActorFutureExt, Addr, AsyncContext, Context, ContextFutureSpawner,
         Handler, Message, MessageResult, ResponseActFuture, Running, WrapFuture,
     };
-    use winner_server::messages::RoomInitialState;
-    use winner_server::types::Winner;
+    use winner_server::types::{Story, StoryId, StoryPoints, Winner};
 
     struct TestClient {
         pub winner: Winner,
@@ -388,12 +384,12 @@ mod test {
         }
     }
 
-    #[actix::test]
-    async fn enter_and_leave() {
+    async fn test_setup() -> (Addr<Room>, Addr<TestClient>, Addr<TestClient>) {
         let room = Room::new("Test").start();
         let client = TestClient::new("test1").start();
         let client2 = TestClient::new("test2").start();
 
+        // Connect to the room
         client
             .send(ConnectToRoom(room.clone()))
             .await
@@ -405,6 +401,13 @@ mod test {
             .unwrap()
             .expect("could not connect to room");
 
+        (room, client, client2)
+    }
+
+    #[actix::test]
+    async fn enter_and_leave() {
+        let (room, client, client2) = test_setup().await;
+
         let state = client2.send(GetStateMessage).await.unwrap().unwrap();
         assert_eq!(state.winners.len(), 2);
         assert!(state.winners.contains(&Winner(String::from("test1"))));
@@ -415,5 +418,37 @@ mod test {
         let state = client2.send(GetStateMessage).await.unwrap().unwrap();
         assert_eq!(state.winners.len(), 1);
         assert!(state.winners.contains(&Winner(String::from("test2"))));
+    }
+
+    #[actix::test]
+    async fn vote_on_story() {
+        let (room, client, ..) = test_setup().await;
+
+        let story = Story::new(StoryId(1), "Bla");
+        room.send(crate::messages::client::StartVote {
+            story: story.clone(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let state = client.send(GetStateMessage).await.unwrap().unwrap();
+        matches!(state.voting_state, RoomVotingState::Voting(_));
+
+        // Vote for both winners
+        for winner in state.winners {
+            room.send(crate::messages::client::Vote {
+                winner,
+                story_id: story.id.clone(),
+                points: StoryPoints::ONE,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        }
+
+        // Same points so should return to idle
+        let state = client.send(GetStateMessage).await.unwrap().unwrap();
+        matches!(state.voting_state, RoomVotingState::Idle);
     }
 }
