@@ -1,15 +1,10 @@
-use actix::prelude::*;
-use std::collections::HashMap;
-use winner_server::messages::{RoomStateChange, StateChange};
-use winner_server::types::{Story, StoryPoints, Winner};
-
 pub type ClientMessages = winner_server::messages::ClientMessages;
 
 pub mod client {
     use super::server;
-    use crate::RoomState;
-    use actix::{Addr, Message, Recipient};
-    use winner_server::messages::RoomInitialState;
+    use crate::room::RoomState;
+    use actix::prelude::*;
+    use actix::Recipient;
     use winner_server::types::{Story, StoryId, StoryPoints, Winner};
 
     // /// Want to enter the room
@@ -75,7 +70,7 @@ pub mod client {
 }
 
 pub mod server {
-    use crate::RoomState;
+    use crate::room::RoomState;
     use actix::Message;
 
     pub struct RoomStateChanged {
