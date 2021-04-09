@@ -1,12 +1,13 @@
-use crate::messages::{server::RoomStateChanged, self};
+use crate::messages::{self, server::RoomStateChanged};
 use actix::prelude::*;
 use rand::seq::IteratorRandom;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 
 use winner_server::types::{Story, StoryPoints, Winner};
 
-#[derive(Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct RoomState {
     pub winners: Vec<Winner>,
     pub leader: Option<Winner>,
@@ -14,20 +15,20 @@ pub struct RoomState {
     pub past_votes: HashMap<Story, StoryPoints>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct ActiveVote {
     pub participants: HashMap<Winner, Option<StoryPoints>>,
     pub story: Story,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct Fight {
     pub fighters: Vec<(Winner, StoryPoints)>,
     pub participants: HashMap<Winner, StoryPoints>,
     pub story: Story,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]
 pub enum RoomVotingState {
     Idle,
     Voting(ActiveVote),
@@ -138,7 +139,7 @@ impl Handler<messages::client::StartVote> for Room {
     fn handle(
         &mut self,
         msg: messages::client::StartVote,
-        ctx: &mut Self::Context,
+        _ctx: &mut Self::Context,
     ) -> Self::Result {
         match &self.voting_state {
             RoomVotingState::Idle => {}
@@ -299,6 +300,7 @@ mod test {
         /// Called when an actor gets polled the first time.
         fn started(&mut self, ctx: &mut Self::Context) {}
 
+        /// When stopping the client leave the room
         fn stopping(&mut self, _: &mut Self::Context) -> Running {
             if let Some(room) = &self.room {
                 room.do_send(client::Leave {
@@ -369,7 +371,7 @@ mod test {
                     .then(|res, act, ctx| {
                         match res {
                             Ok(Ok(res)) => act.state = res,
-                            // something is wrong with chat server
+                            // something is wrong with winner server
                             _ => ctx.stop(),
                         }
                         actix::fut::ready(Ok(()))

@@ -1,26 +1,20 @@
-pub type ClientMessages = winner_server::messages::ClientMessages;
-
 pub mod client {
     use super::server;
     use crate::room::RoomState;
     use actix::prelude::*;
     use actix::Recipient;
+    use serde::{Deserialize, Serialize};
     use winner_server::types::{Story, StoryId, StoryPoints, Winner};
 
-    // /// Want to enter the room
-    // EnterRoom(Winner),
-    // /// Leave the room
-    // LeaveRoom(Winner),
-    // /// Reply to acknowledge the leader
-    // AcknowledgeLeader(bool),
-    // /// Sent when a vote has to be done for a story
-    // StartVote(Story),
-    // /// Sent to cast an actual vote
-    // Vote((Winner, Story, StoryPoints)),
-    // /// Fight resolved
-    // FightResolved,
-    // // Final story points, which should include the leader correct story and storypoints
-    // //FinalStoryPoints((Winner, Story, StoryPoints)),
+    #[derive(Serialize, Deserialize)]
+    #[serde(tag = "cmd", content = "data")]
+    pub enum ClientRequest {
+        Enter(Winner),
+        Leave(Winner),
+        StartVote(Story),
+        RestartVote,
+        Vote(Winner, StoryId, StoryPoints),
+    }
 
     /// Sent by the client when it wants to enter a room
     pub struct Enter {
@@ -72,7 +66,17 @@ pub mod client {
 pub mod server {
     use crate::room::RoomState;
     use actix::Message;
+    use serde::{Deserialize, Serialize};
 
+    #[derive(Serialize, Deserialize)]
+    pub enum ServerResponse {
+        Ok,
+        Err(String),
+        State(RoomState),
+        Ping,
+    }
+
+    #[derive(Serialize, Deserialize)]
     pub struct RoomStateChanged {
         pub state: RoomState,
     }
