@@ -68,7 +68,7 @@ pub mod server {
     use actix::Message;
     use serde::{Deserialize, Serialize};
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Debug, Serialize, Deserialize)]
     pub enum ServerResponse {
         Ok,
         Err(String),

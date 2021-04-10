@@ -49,9 +49,9 @@ impl Encoder<ServerResponse> for WinnerCodec {
 }
 
 /// Codec for client side
-pub struct ClientChatCodec;
+pub struct ClientWinnerCodec;
 
-impl Decoder for ClientChatCodec {
+impl Decoder for ClientWinnerCodec {
     type Item = ServerResponse;
     type Error = io::Error;
 
@@ -73,7 +73,7 @@ impl Decoder for ClientChatCodec {
     }
 }
 
-impl Encoder<ClientRequest> for ClientChatCodec {
+impl Encoder<ClientRequest> for ClientWinnerCodec {
     type Error = io::Error;
 
     fn encode(&mut self, msg: ClientRequest, dst: &mut BytesMut) -> Result<(), Self::Error> {
