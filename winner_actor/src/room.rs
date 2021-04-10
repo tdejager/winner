@@ -72,7 +72,7 @@ impl Actor for Room {
 impl Handler<messages::client::Enter> for Room {
     type Result = anyhow::Result<RoomState>;
 
-    fn handle(&mut self, msg: messages::client::Enter, ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: messages::client::Enter, _ctx: &mut Self::Context) -> Self::Result {
         if self.winners.contains_key(&msg.winner) {
             anyhow::bail!("duplicate winner name: '{}'", msg.winner);
         }
@@ -169,7 +169,7 @@ impl Handler<messages::client::StartVote> for Room {
 impl Handler<messages::client::Vote> for Room {
     type Result = anyhow::Result<()>;
 
-    fn handle(&mut self, msg: messages::client::Vote, ctx: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, msg: messages::client::Vote, _ctx: &mut Self::Context) -> Self::Result {
         let vote = match &mut self.voting_state {
             RoomVotingState::Idle => {
                 anyhow::bail!("no voting session active")
@@ -298,7 +298,7 @@ mod test {
         type Context = Context<Self>;
 
         /// Called when an actor gets polled the first time.
-        fn started(&mut self, ctx: &mut Self::Context) {}
+        fn started(&mut self, _ctx: &mut Self::Context) {}
 
         /// When stopping the client leave the room
         fn stopping(&mut self, _: &mut Self::Context) -> Running {
@@ -402,7 +402,7 @@ mod test {
 
     #[actix::test]
     async fn enter_and_leave() {
-        let (room, client, client2) = test_setup().await;
+        let (_room, client, client2) = test_setup().await;
 
         let state = client2.send(GetStateMessage).await.unwrap().unwrap();
         assert_eq!(state.winners.len(), 2);

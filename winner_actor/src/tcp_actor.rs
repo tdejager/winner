@@ -6,8 +6,8 @@ use actix::prelude::*;
 use futures::future::Ready;
 use futures::io::Error;
 use futures::StreamExt;
-use std::str::FromStr;
-use std::time::{Duration, Instant};
+
+
 use tokio::io::WriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::FramedRead;
@@ -25,7 +25,7 @@ impl Actor for RoomSession {
     /// It is convenient wrapper around `Framed` object from `tokio_io`
     type Context = Context<Self>;
 
-    fn started(&mut self, ctx: &mut Self::Context) {}
+    fn started(&mut self, _ctx: &mut Self::Context) {}
 
     fn stopping(&mut self, _: &mut Self::Context) -> Running {
         // notify chat server
