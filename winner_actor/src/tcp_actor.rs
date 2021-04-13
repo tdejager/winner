@@ -7,7 +7,6 @@ use futures::future::Ready;
 use futures::io::Error;
 use futures::StreamExt;
 
-
 use tokio::io::WriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::FramedRead;
@@ -187,35 +186,145 @@ pub async fn tcp_server(listener: TcpListener, room: Addr<Room>) {
 
 #[cfg(test)]
 mod test {
+    use crate::codec::ClientWinnerCodec;
     use crate::messages::client::ClientRequest;
+    use crate::messages::server::ServerResponse;
     use crate::room;
     use actix::Actor;
     use futures::{SinkExt, StreamExt};
+    use std::net::SocketAddr;
     use tokio::net::{TcpListener, TcpStream};
     use tokio_util::codec::Framed;
-    use winner_server::types::Winner;
+    use winner_server::types::{Story, StoryId, Winner};
 
-    #[actix::test]
-    pub async fn test_connect_leave() {
+    pub async fn test_setup() -> SocketAddr {
         let room = room::Room::new("VotingRoom").start();
 
         // Setup the TCP side of things
         let tcp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let tcp_address = tcp_listener.local_addr().unwrap();
         actix::spawn(async { crate::tcp_actor::tcp_server(tcp_listener, room).await });
+        tcp_address
+    }
 
+    pub async fn setup_client(address: &SocketAddr) -> Framed<TcpStream, ClientWinnerCodec> {
         // Create a client
-        let stream = TcpStream::connect(tcp_address).await.unwrap();
-        let mut framed = Framed::new(stream, crate::codec::ClientWinnerCodec);
+        let stream = TcpStream::connect(address).await.unwrap();
+        Framed::new(stream, crate::codec::ClientWinnerCodec)
+    }
 
+    /// Await message and check if it is the correct type
+    macro_rules! await_and_msg {
+        ($a:expr, $p:pat) => {
+            assert!(matches!($a.await.unwrap().unwrap(), $p));
+        };
+    }
+
+    macro_rules! await_assert_state {
+        ($a:expr, $name:ident, $assertion:expr) => {
+            let e = $a.await.unwrap().unwrap();
+            match e {
+                crate::messages::server::ServerResponse::State($name) => assert!($assertion),
+                _ => panic!("Wrong server state received"),
+            }
+        };
+    }
+
+    #[actix::test]
+    pub async fn test_connect_leave() {
+        let tcp_address = test_setup().await;
+        let mut framed = setup_client(&tcp_address).await;
         let winner = Winner("Me".into());
 
         // Enter room
         framed.send(ClientRequest::Enter(winner)).await.unwrap();
 
-        dbg!(framed.next().await);
-        dbg!(framed.next().await);
+        // Receive ok and then receive state
+        await_and_msg!(framed.next(), ServerResponse::Ok);
+        await_and_msg!(framed.next(), ServerResponse::State(_));
 
         framed.close().await.unwrap();
+    }
+
+    #[actix::test]
+    pub async fn test_connect_leave_two_clients() {
+        let tcp_address = test_setup().await;
+        // Create a client
+        let mut first = setup_client(&tcp_address).await;
+        let mut second = setup_client(&tcp_address).await;
+
+        let winner = Winner("Me".into());
+        let rival = Winner("Rival".into());
+
+        // Enter room
+        first.send(ClientRequest::Enter(winner)).await.unwrap();
+
+        // Receive ok and then receive state
+        await_and_msg!(first.next(), ServerResponse::Ok);
+        await_and_msg!(first.next(), ServerResponse::State(_));
+        // Enter room second client
+        second.send(ClientRequest::Enter(rival)).await.unwrap();
+        await_and_msg!(second.next(), ServerResponse::Ok);
+        await_and_msg!(second.next(), ServerResponse::State(_));
+
+        first.close().await.unwrap();
+
+        // We should receive a state update, should be a single winner left
+        await_assert_state!(second.next(), state, state.winners.len() == 1);
+    }
+
+    /// Check if we are in the voting state
+    pub async fn check_if_voting(framed: &mut Framed<TcpStream, ClientWinnerCodec>) {
+        let state = framed.next().await.unwrap().unwrap();
+        if let ServerResponse::State(state) = state {
+            assert!(matches!(
+                state.voting_state,
+                room::RoomVotingState::Voting(_)
+            ));
+        } else {
+            assert!(false, "Received Ok/Err instead of State")
+        }
+    }
+
+    #[actix::test]
+    pub async fn test_vote() {
+        let tcp_address = test_setup().await;
+        // Create a client
+        let mut first = setup_client(&tcp_address).await;
+        let mut second = setup_client(&tcp_address).await;
+
+        // Create winners
+        let winner = Winner("Me".into());
+        let rival = Winner("Rival".into());
+
+        // Enter room
+        first.send(ClientRequest::Enter(winner)).await.unwrap();
+
+        // Receive ok and then receive state
+        await_and_msg!(first.next(), ServerResponse::Ok);
+        await_and_msg!(first.next(), ServerResponse::State(_));
+        // Enter room second client
+        second.send(ClientRequest::Enter(rival)).await.unwrap();
+        await_and_msg!(second.next(), ServerResponse::Ok);
+        await_and_msg!(second.next(), ServerResponse::State(_));
+
+        // Receive second client entering
+        await_and_msg!(first.next(), ServerResponse::State(_));
+
+        // Send a start vote
+        first
+            .send(ClientRequest::StartVote(Story::new(
+                StoryId(1),
+                "First Story",
+            )))
+            .await
+            .unwrap();
+
+        // Receive an ok and 2 state updates
+        await_and_msg!(first.next(), ServerResponse::Ok);
+
+        // Check if we are in voting state
+        check_if_voting(&mut first).await;
+        check_if_voting(&mut second).await;
     }
 }
