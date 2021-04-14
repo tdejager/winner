@@ -6,6 +6,7 @@ use tokio_util::codec::{Framed, FramedRead, FramedWrite};
 use winner_actor::codec::ClientWinnerCodec;
 use winner_actor::messages::client::ClientRequest;
 use winner_actor::room::RoomState;
+use winner_server::types::Winner;
 
 /// Multiplex the read half into server reponse and room state
 pub async fn multiplex(
@@ -54,10 +55,11 @@ pub struct ClientAPI {
     state_receiver: tokio::sync::mpsc::Receiver<RoomState>,
     response_receiver: tokio::sync::mpsc::Receiver<anyhow::Result<()>>,
     framed_write: FramedWrite<OwnedWriteHalf, ClientWinnerCodec>,
+    winner: Winner
 }
 
 impl ClientAPI {
-    pub async fn new(stream: TcpStream) -> Self {
+    pub async fn new(stream: TcpStream, winner: Winner) -> Self {
         // Split into read and write interface
         let (read, write) = stream.into_split();
         // Create frames
@@ -70,6 +72,7 @@ impl ClientAPI {
             state_receiver,
             response_receiver,
             framed_write,
+            winner,
         }
     }
 
@@ -90,5 +93,10 @@ impl ClientAPI {
             .await
             .ok_or_else(|| anyhow::anyhow!("Channel closed"))??;
         Ok(())
+    }
+
+    /// Enter the actual room
+    async fn enter_room(&mut self) -> anyhow::Result<()> {
+        self.send_request(ClientRequest::Enter(self.winner.clone())).await
     }
 }

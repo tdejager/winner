@@ -14,7 +14,7 @@ async fn main() {
         .expect("Could not connect to server");
 
     // Connect the client
-    let _client = winner_cli::ClientAPI::new(tcp_stream).await;
+    let _client = winner_cli::ClientAPI::new(tcp_stream, Winner("Me".to_string())).await;
     
     // Todo actually do something
 }
