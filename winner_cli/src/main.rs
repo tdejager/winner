@@ -1,5 +1,5 @@
 use std::env;
-use winner_cli::client;
+use winner_cli;
 use winner_server::types::Winner;
 
 #[tokio::main]
@@ -9,7 +9,12 @@ async fn main() {
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:8080".to_string());
 
-    let winner = Winner("Me".into());
-    let _ = client::connect_and_subscribe(&winner, addr.parse().unwrap());
-    println!("Hello, world!");
+    let tcp_stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("Could not connect to server");
+
+    // Connect the client
+    let _client = winner_cli::ClientAPI::new(tcp_stream).await;
+    
+    // Todo actually do something
 }

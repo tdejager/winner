@@ -5,7 +5,6 @@ use crate::room::Room;
 use actix::prelude::*;
 use futures::future::Ready;
 use futures::io::Error;
-use futures::StreamExt;
 
 use tokio::io::WriteHalf;
 use tokio::net::{TcpListener, TcpStream};
