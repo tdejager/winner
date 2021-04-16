@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 
+use std::fmt::Formatter;
 use winner_server::types::{Story, StoryPoints, Winner};
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -13,6 +14,23 @@ pub struct RoomState {
     pub leader: Option<Winner>,
     pub voting_state: RoomVotingState,
     pub past_votes: HashMap<Story, StoryPoints>,
+}
+
+impl std::fmt::Display for RoomState {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Winners in room: ")?;
+        for w in &self.winners {
+            write!(f, "{},", w.0)?;
+        }
+        write!(f, "\n")?;
+        write!(
+            f,
+            "{}\n",
+            self.leader.clone().map_or("None".into(), |w| w.0)
+        )?;
+        write!(f, "Voting state: {:?}\n", self.voting_state)?;
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]

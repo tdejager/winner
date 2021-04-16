@@ -1,12 +1,14 @@
 use futures::{SinkExt, StreamExt};
+use std::future::Future;
 use tokio::io::WriteHalf;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::mpsc::Receiver;
 use tokio::{io::ReadHalf, net::TcpStream};
 use tokio_util::codec::{Framed, FramedRead, FramedWrite};
 use winner_actor::codec::ClientWinnerCodec;
-use winner_actor::messages::client::ClientRequest;
+use winner_actor::messages::client::{ClientRequest, StartVote};
 use winner_actor::room::RoomState;
-use winner_server::types::Winner;
+use winner_server::types::{Story, StoryId, StoryPoints, Winner};
 
 /// Multiplex the read half into server reponse and room state
 pub async fn multiplex(
@@ -52,33 +54,39 @@ pub async fn multiplex(
 }
 
 pub struct ClientAPI {
-    state_receiver: tokio::sync::mpsc::Receiver<RoomState>,
     response_receiver: tokio::sync::mpsc::Receiver<anyhow::Result<()>>,
     framed_write: FramedWrite<OwnedWriteHalf, ClientWinnerCodec>,
-    winner: Winner
+    winner: Winner,
+}
+
+pub async fn create_client(
+    stream: TcpStream,
+    winner: Winner,
+) -> (ClientAPI, Receiver<RoomState>) {
+    // Split into read and write interface
+    let (read_half, write_half) = stream.into_split();
+    // Create frames
+    let framed_read = FramedRead::new(read_half, ClientWinnerCodec);
+    let framed_write = FramedWrite::new(write_half, ClientWinnerCodec);
+    // Multiplex the reader
+    let (response_receiver, state_receiver) = multiplex(framed_read).await;
+    (
+        ClientAPI::new(framed_write, response_receiver, winner),
+        state_receiver,
+    )
 }
 
 impl ClientAPI {
-    pub async fn new(stream: TcpStream, winner: Winner) -> Self {
-        // Split into read and write interface
-        let (read, write) = stream.into_split();
-        // Create frames
-        let framed_read = FramedRead::new(read, ClientWinnerCodec);
-        let framed_write = FramedWrite::new(write, ClientWinnerCodec);
-        // Multiplex the reader
-        let (response_receiver, state_receiver) = multiplex(framed_read).await;
-
+    fn new(
+        framed_write: FramedWrite<OwnedWriteHalf, ClientWinnerCodec>,
+        response_receiver: tokio::sync::mpsc::Receiver<anyhow::Result<()>>,
+        winner: Winner,
+    ) -> Self {
         Self {
-            state_receiver,
             response_receiver,
             framed_write,
             winner,
         }
-    }
-
-    /// Get the next state for the room
-    pub async fn next_state(&mut self) -> Option<RoomState> {
-        self.state_receiver.recv().await
     }
 
     /// Send the client request and wait for a response
@@ -96,7 +104,24 @@ impl ClientAPI {
     }
 
     /// Enter the actual room
-    async fn enter_room(&mut self) -> anyhow::Result<()> {
-        self.send_request(ClientRequest::Enter(self.winner.clone())).await
+    pub async fn enter_room(&mut self) -> anyhow::Result<()> {
+        self.send_request(ClientRequest::Enter(self.winner.clone()))
+            .await
+    }
+
+    /// Vote on a story
+    pub async fn vote(&mut self, story: StoryId, points: StoryPoints) -> anyhow::Result<()> {
+        self.send_request(ClientRequest::Vote(self.winner.clone(), story, points))
+            .await
+    }
+
+    /// Start a new vote
+    pub async fn start_vote(&mut self, story: Story) -> anyhow::Result<()> {
+        self.send_request(ClientRequest::StartVote(story)).await
+    }
+
+    /// Restart a vote
+    pub async fn restart_vote(&mut self) -> anyhow::Result<()> {
+        self.send_request(ClientRequest::RestartVote).await
     }
 }
