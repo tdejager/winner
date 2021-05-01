@@ -59,10 +59,7 @@ pub struct ClientAPI {
     winner: Winner,
 }
 
-pub async fn create_client(
-    stream: TcpStream,
-    winner: Winner,
-) -> (ClientAPI, Receiver<RoomState>) {
+pub async fn create_client(stream: TcpStream, winner: Winner) -> (ClientAPI, Receiver<RoomState>) {
     // Split into read and write interface
     let (read_half, write_half) = stream.into_split();
     // Create frames

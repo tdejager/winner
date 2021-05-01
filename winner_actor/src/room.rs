@@ -8,7 +8,7 @@ use std::ops::Deref;
 use std::fmt::Formatter;
 use winner_server::types::{Story, StoryPoints, Winner};
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, Eq, PartialEq)]
 pub struct RoomState {
     pub winners: Vec<Winner>,
     pub leader: Option<Winner>,

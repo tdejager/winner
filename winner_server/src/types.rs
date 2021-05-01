@@ -56,6 +56,39 @@ pub enum StoryPoints {
     COFFEE = 101,
 }
 
+impl std::str::FromStr for StoryPoints {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "1" => StoryPoints::ONE,
+            "2" => StoryPoints::TWO,
+            "3" => StoryPoints::THREE,
+            "4" => StoryPoints::FIVE,
+            "8" => StoryPoints::EIGHT,
+            "13" => StoryPoints::THIRTEEN,
+            "20" => StoryPoints::THIRTEEN,
+            _ => { anyhow::bail!("Wrong point type")}
+        })
+    }
+}
+
+impl fmt::Display for StoryPoints {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            StoryPoints::ONE => write!(f, "1"),
+            StoryPoints::TWO => write!(f, "2"),
+            StoryPoints::THREE => write!(f, "3"),
+            StoryPoints::FIVE => write!(f, "4"),
+            StoryPoints::EIGHT => write!(f, "8"),
+            StoryPoints::THIRTEEN => write!(f, "13"),
+            StoryPoints::TWENTY => write!(f, "20"),
+            StoryPoints::UNKOWN => write!(f, "?"),
+            StoryPoints::COFFEE => write!(f, "☕"),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Vote {
     pub story_count: StoryPoints,

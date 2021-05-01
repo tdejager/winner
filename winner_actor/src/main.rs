@@ -7,6 +7,7 @@ use winner_actor::tcp_actor::tcp_server;
 #[actix::main]
 async fn main() {
     env_logger::init();
+    info!("Hi, from winner server!");
 
     // Setup a room
     let room = Room::new("VotingRoom").start();
